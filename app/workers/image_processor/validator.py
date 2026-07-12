@@ -1,5 +1,3 @@
-# variants/validation.py
-
 import numpy as np
 
 from .models import Image

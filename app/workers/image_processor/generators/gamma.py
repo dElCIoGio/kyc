@@ -10,7 +10,7 @@ from .utils import format_value, get_parameter, require_numeric_sequence
 class GammaVariantGenerator:
     name = "gamma"
 
-    def __init__(self, *, gamma_values: Sequence[float] = (0.8, 1.0, 1.2)) -> None:
+    def __init__(self, *, gamma_values: Sequence[float] = (0.8, 1.2, 1.4)) -> None:
         self.gamma_values = tuple(gamma_values)
 
     def generate(

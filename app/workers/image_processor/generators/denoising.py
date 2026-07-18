@@ -10,7 +10,7 @@ from .utils import format_value, get_parameter, require_numeric_sequence
 class DenoisingVariantGenerator:
     name = "denoising"
 
-    def __init__(self, *, h_values: Sequence[float] = (10.0,)) -> None:
+    def __init__(self, *, h_values: Sequence[float] = (3.0, 5.0, 7.0,)) -> None:
         self.h_values = tuple(h_values)
 
     def generate(

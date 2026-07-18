@@ -13,8 +13,9 @@ class ContrastBrightnessVariantGenerator:
         self,
         *,
         adjustments: Sequence[Mapping[str, float | int]] = (
-            {"alpha": 1.0, "beta": 0},
-            {"alpha": 1.2, "beta": 10},
+            {"alpha": 1.0, "beta": 10},
+            {"alpha": 1.15, "beta": 0},
+            {"alpha": 1.15, "beta": 5},
         ),
     ) -> None:
         self.adjustments = tuple(dict(adjustment) for adjustment in adjustments)

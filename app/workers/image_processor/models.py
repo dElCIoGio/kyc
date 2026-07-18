@@ -16,5 +16,5 @@ class VariantInfo:
 
 @dataclass(frozen=True)
 class VariantBatch:
-    generator: str
+    generator: str 
     variants: Sequence[VariantInfo]

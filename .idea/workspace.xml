@@ -6,7 +6,9 @@
   <component name="ChangeListManager">
     <list default="true" id="c0cd0979-a28c-4319-bc5a-399fb7c99ee8" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/workers/image_processor/.gitignore" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/workers/image_processor/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/app/workers/image_processor/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/workers/image_processor/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/workers/image_processor/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/workers/image_processor/models.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/workers/image_processor/models.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -21,7 +23,7 @@
     </option>
   </component>
   <component name="Git.Settings">
-    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$/app/workers/image_processor" />
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
   &quot;lastFilter&quot;: {
@@ -43,19 +45,20 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
-    &quot;last_opened_file_path&quot;: &quot;C:/Users/dagos/IdeaProjects/kyc&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "main",
+    "last_opened_file_path": "C:/Users/dagos/IdeaProjects/kyc/app/workers/image_processor",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "vue.rearranger.settings.migration": "true"
   }
-}</component>
+}]]></component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -72,7 +75,12 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1783854243345</updated>
-      <workItem from="1783854244635" duration="2508000" />
+      <workItem from="1783854244635" duration="7713000" />
+      <workItem from="1784241704755" duration="22000" />
+      <workItem from="1784284952294" duration="2493000" />
+      <workItem from="1784319319813" duration="1896000" />
+      <workItem from="1784353090658" duration="72000" />
+      <workItem from="1784353196737" duration="31000" />
     </task>
     <servers />
   </component>

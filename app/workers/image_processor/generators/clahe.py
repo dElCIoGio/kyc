@@ -18,8 +18,8 @@ class ClaheVariantGenerator:
     def __init__(
         self,
         *,
-        clip_limits: Sequence[float] = (2.0,),
-        tile_grid_sizes: Sequence[tuple[int, int]] = ((8, 8),),
+        clip_limits: Sequence[float] = (1.5, 2.0, 3.0),
+        tile_grid_sizes: Sequence[tuple[int, int]] = ((4, 4), (8, 8), (16, 16),),
     ) -> None:
         self.clip_limits = tuple(clip_limits)
         self.tile_grid_sizes = tuple(tile_grid_sizes)

@@ -9,7 +9,7 @@ from .utils import format_value, get_parameter, require_numeric_sequence
 class SharpeningVariantGenerator:
     name = "sharpening"
 
-    def __init__(self, *, strengths: Sequence[float] = (1.0,)) -> None:
+    def __init__(self, *, strengths: Sequence[float] = (1.0, 0.5,)) -> None:
         self.strengths = tuple(strengths)
 
     def generate(

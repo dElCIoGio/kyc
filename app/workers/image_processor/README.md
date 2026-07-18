@@ -1,18 +1,52 @@
 # Image Processor Worker
 
-This worker will generate preprocessing variants for one image. The intended flow is:
+This worker generates preprocessing variants for one image. The intended flow is:
 
 ```text
 image_path -> cv2.imread(path) -> validate_image(image) -> VariantGenerationContext -> VariantBatch[]
 ```
 
-The image should be read once with `cv2.imread(path)`, then passed as an in-memory OpenCV/Numpy image to a configurable set of variant generators. Each generator follows the strategy pattern and returns one strongly typed `VariantBatch` containing all variants produced by that strategy.
+The image is read once with `cv2.imread(path)`, then passed as an in-memory OpenCV/Numpy image to a configurable set of variant generators. Each generator follows the strategy pattern and returns one strongly typed `VariantBatch` containing all variants produced by that strategy.
 
 ## Current State
 
-- `main.py` is still a placeholder entrypoint.
-- `validator.py` validates `np.ndarray` images and already expects an `Image` type from a future `models.py`.
-- `pyproject.toml` does not yet declare `numpy` or `opencv-python`, which will be required for implementation.
+- `main.py` can generate all default variants and optionally save them to disk.
+- `validator.py` validates `np.ndarray` images through the shared `Image` type alias.
+- `pyproject.toml` declares `numpy` and `opencv-python`.
+
+## CLI Usage
+
+Generate variants and print a summary:
+
+```powershell
+python main.py "img.png"
+```
+
+Generate and save every variant:
+
+```powershell
+python main.py "img.png" --output-dir "variants"
+```
+
+Saved files are grouped by generator:
+
+```text
+variants/
+  original/
+    original.png
+  grayscale/
+    grayscale.png
+  gamma/
+    gamma_0.8.png
+    gamma_1.0.png
+    gamma_1.2.png
+```
+
+Saved images default to `.png`. Use `--extension` to choose another OpenCV-supported output format:
+
+```powershell
+python main.py "img.png" --output-dir "variants" --extension ".jpg"
+```
 
 ## Design Docs
 

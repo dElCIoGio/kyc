@@ -1,0 +1,70 @@
+{
+  "profile_id": "ao_id_card/front/v1",
+  "document_type": "ao_id_card",
+  "side": "front",
+  "canonical_width": 718,
+  "canonical_height": 467,
+  "review_status": "provisional",
+  "fields": [
+    {
+      "name": "full_name",
+      "x": 42,
+      "y": 203,
+      "width": 240,
+      "height": 48,
+      "padding": 2,
+      "required": true,
+      "value_type": "name",
+      "multiline": true,
+      "ocr_mode": "multiline",
+      "comparison": "casefold_whitespace",
+      "normalizer": "name",
+      "validator": "name"
+    },
+    {
+      "name": "father_name",
+      "x": 42,
+      "y": 269,
+      "width": 300,
+      "height": 55,
+      "padding": 2,
+      "required": false,
+      "value_type": "name",
+      "multiline": true,
+      "ocr_mode": "multiline",
+      "comparison": "casefold_whitespace",
+      "normalizer": "name",
+      "validator": "name"
+    },
+    {
+      "name": "mother_name",
+      "x": 42,
+      "y": 350,
+      "width": 382,
+      "height": 55,
+      "padding": 2,
+      "required": false,
+      "value_type": "name",
+      "multiline": true,
+      "ocr_mode": "multiline",
+      "comparison": "casefold_whitespace",
+      "normalizer": "name",
+      "validator": "name"
+    },
+    {
+      "name": "id_number",
+      "x": 42,
+      "y": 435,
+      "width": 278,
+      "height": 31,
+      "padding": 2,
+      "required": true,
+      "value_type": "document_id",
+      "multiline": false,
+      "ocr_mode": "single_line",
+      "comparison": "alphanumeric_upper",
+      "normalizer": "document_id",
+      "validator": "document_id_basic"
+    }
+  ]
+}

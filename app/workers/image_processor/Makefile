@@ -1,2 +1,2 @@
 run:
-	python main.py "img.png" --output-dir "variants"
+	python main.py "img_cropped.png" --output-dir "variants"

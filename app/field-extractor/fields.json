@@ -1,0 +1,40 @@
+{
+  "fields": [
+    {
+      "name": "full_name",
+      "x": 5,
+      "y": 202,
+      "width": 273,
+      "height": 46,
+      "multi_line": true,
+      "description": "Nome Completo"
+    },
+    {
+      "name": "father_name",
+      "x": 5,
+      "y": 268,
+      "width": 335,
+      "height": 48,
+      "multi_line": true,
+      "description": "Filiacao - first name before the bold 'e' separator"
+    },
+    {
+      "name": "mother_name",
+      "x": 5,
+      "y": 340,
+      "width": 413,
+      "height": 57,
+      "multi_line": true,
+      "description": "Filiacao - name after the bold 'e' separator"
+    },
+    {
+      "name": "id_number",
+      "x": 5,
+      "y": 408,
+      "width": 275,
+      "height": 32,
+      "multi_line": false,
+      "description": "Bilhete de Identidade No."
+    }
+  ]
+}

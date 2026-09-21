@@ -1,0 +1,27 @@
+{
+  "fields": [
+    {
+      "name": "full_name",
+      "x": 20,
+      "y": 15,
+      "width": 250,
+      "height": 40,
+      "description": "Cardholder's full name"
+    },
+    {
+      "name": "document_id",
+      "x": 20,
+      "y": 115,
+      "width": 250,
+      "height": 40
+    },
+    {
+      "name": "address",
+      "x": 20,
+      "y": 215,
+      "width": 400,
+      "height": 40,
+      "multi_line": true
+    }
+  ]
+}

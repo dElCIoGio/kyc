@@ -1,0 +1,59 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating-system state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Local models and inference caches
+models/
+model-cache/
+private-models/
+*.onnx
+*.pdmodel
+*.pdparams
+*.pt
+*.pth
+
+# Generated image-processing and OCR output
+variants/
+results.json
+ocr-results/
+reports/
+
+# Real or unreviewed identity-document data must never be committed.
+private-data/
+private-fixtures/
+local-documents/
+app/workers/image_processor/img.png
+app/workers/image_processor/img_1.png
+app/workers/image_processor/img_cropped.png
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "angolan-kyc-engine"
+version = "0.1.0"
+description = "Offline core engine for extracting structured fields from Angolan ID cards"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0,<3",
+    "opencv-python-headless>=4.10,<5",
+    "Pillow>=11,<13",
+]
+
+[project.optional-dependencies]
+ocr = [
+    "paddleocr>=3.4,<4",
+    "paddlepaddle>=3.2,<4",
+]
+detection = ["onnxruntime>=1.20,<2"]
+dev = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kyc_engine = ["configs/*.json"]
+

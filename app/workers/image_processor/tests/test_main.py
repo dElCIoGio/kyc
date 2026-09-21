@@ -13,6 +13,7 @@ from image_processor.main import (
     _normalize_extension,
     _safe_path_part,
     assess_variant_batches,
+    build_default_context,
     build_default_quality_pipeline,
     main,
     save_variant_batches,
@@ -118,6 +119,9 @@ class SaveVariantBatchTests(unittest.TestCase):
         import cv2
 
         image = np.zeros((8, 8, 3), dtype=np.uint8)
+        batches = build_default_context().generate(image)
+        variant_count = sum(len(batch.variants) for batch in batches)
+        assessor_count = len(build_default_quality_pipeline().assessor_names)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             image_path = Path(tmpdir) / "image.png"
@@ -129,8 +133,15 @@ class SaveVariantBatchTests(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         text = output.getvalue()
-        self.assertIn("Generated 13 variants across 8 batches.", text)
-        self.assertIn("Assessed 13 variants with 65 quality results.", text)
+        self.assertIn(
+            f"Generated {variant_count} variants across {len(batches)} batches.",
+            text,
+        )
+        self.assertIn(
+            f"Assessed {variant_count} variants with "
+            f"{variant_count * assessor_count} quality results.",
+            text,
+        )
         self.assertIn("sharpness(laplacian_variance=", text)
         self.assertIn("histogram_clipping(", text)
 

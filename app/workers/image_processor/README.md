@@ -1,9 +1,13 @@
 # Image Processor Worker
 
-This worker generates preprocessing variants for one image. The intended flow is:
+This legacy compatibility module generates preprocessing variants for one already loaded image and measures objective quality properties for every variant. New core development lives in [`src/kyc_engine`](../../../src/kyc_engine); this module remains while existing imports and its CLI migrate. It does not detect an identity card, correct perspective, extract fields, rank variants, or establish document authenticity.
+
+The current flow is:
 
 ```text
-image_path -> cv2.imread(path) -> validate_image(image) -> VariantGenerationContext -> VariantBatch[]
+image_path -> cv2.imread(path) -> validate_image(image) -> VariantGenerationContext
+           -> VariantBatch[] -> VariantQualityAssessmentPipeline
+           -> VariantBatchAssessment[]
 ```
 
 The image is read once with `cv2.imread(path)`, then passed as an in-memory OpenCV/Numpy image to a configurable set of variant generators. Each generator follows the strategy pattern and returns one strongly typed `VariantBatch` containing all variants produced by that strategy.
@@ -13,6 +17,9 @@ The image is read once with `cv2.imread(path)`, then passed as an in-memory Open
 - `main.py` can generate all default variants and optionally save them to disk.
 - `validator.py` validates `np.ndarray` images through the shared `Image` type alias.
 - `pyproject.toml` declares `numpy` and `opencv-python`.
+- The default configuration currently produces 25 variants across eight generator batches and applies five quality assessors to each variant.
+
+Generated variants are local diagnostics and are ignored by Git. Do not use real identity-card photographs as committed examples.
 
 ## CLI Usage
 
@@ -53,6 +60,8 @@ python main.py "img.png" --output-dir "variants" --extension ".jpg"
 - [Variant generation architecture](docs/variant-generation-architecture.md)
 - [Generator specifications](docs/generator-specifications.md)
 - [Implementation roadmap](docs/implementation-roadmap.md)
+- [Repository architecture](../../../docs/architecture.md)
+- [Security and data handling](../../../docs/security-and-data-handling.md)
 
 ## Target Usage Shape
 

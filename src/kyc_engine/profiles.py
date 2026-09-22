@@ -5,11 +5,19 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
 
-from .contracts import BoundingBox, DocumentProfile, FieldDefinition
+from .contracts import BoundingBox, DocumentProfile, FieldDefinition, QrCodeDefinition
 
 SUPPORTED_OCR_MODES = {"single_line", "multiline"}
 SUPPORTED_COMPARISONS = {"casefold_whitespace", "alphanumeric_upper", "date"}
-SUPPORTED_NORMALIZERS = {"text", "name", "document_id", "date", "enum"}
+SUPPORTED_NORMALIZERS = {
+    "text",
+    "name",
+    "document_id",
+    "date",
+    "enum",
+    "residence",
+    "place_of_birth",
+}
 SUPPORTED_VALIDATORS = {
     "non_empty",
     "name",
@@ -62,11 +70,15 @@ def load_profile(path: str | Path) -> DocumentProfile:
 
 
 def load_default_profile() -> DocumentProfile:
-    profile_resource = resources.files("kyc_engine").joinpath(
-        "configs/ao_id_card_front_v1.json"
+    return load_default_profiles()[0]
+
+
+def load_default_profiles() -> tuple[DocumentProfile, ...]:
+    config_root = resources.files("kyc_engine").joinpath("configs")
+    return tuple(
+        profile_from_mapping(json.loads(config_root.joinpath(name).read_text(encoding="utf-8")))
+        for name in ("ao_id_card_front_v1.json", "ao_id_card_back_v1.json")
     )
-    raw = json.loads(profile_resource.read_text(encoding="utf-8"))
-    return profile_from_mapping(raw)
 
 
 def profile_from_mapping(raw: object) -> DocumentProfile:
@@ -85,6 +97,7 @@ def profile_from_mapping(raw: object) -> DocumentProfile:
         canonical_height=_required_int(raw, "canonical_height"),
         review_status=_required_str(raw, "review_status"),
         fields=fields,
+        qr_code=_qr_code_from_mapping(raw.get("qr_code")),
     )
     validate_profile(profile)
     return profile
@@ -99,6 +112,12 @@ def validate_profile(profile: DocumentProfile) -> None:
         raise ValueError("Profile review_status must be provisional or reviewed")
     if not profile.fields:
         raise ValueError("Document profile must contain at least one field")
+    if profile.qr_code is not None:
+        box = profile.qr_code.bounding_box
+        if box.right > profile.canonical_width or box.bottom > profile.canonical_height:
+            raise ValueError("QR code lies outside canonical dimensions")
+        if profile.qr_code.padding < 0:
+            raise ValueError("QR code padding cannot be negative")
 
     names: set[str] = set()
     for item in profile.fields:
@@ -140,6 +159,22 @@ def _field_from_mapping(raw: object) -> FieldDefinition:
         comparison=str(raw.get("comparison", "casefold_whitespace")),
         normalizer=str(raw.get("normalizer", "text")),
         validator=str(raw.get("validator", "non_empty")),
+    )
+
+
+def _qr_code_from_mapping(raw: object) -> QrCodeDefinition | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise TypeError("QR code definition must be a mapping")
+    return QrCodeDefinition(
+        bounding_box=BoundingBox(
+            x=_required_int(raw, "x"),
+            y=_required_int(raw, "y"),
+            width=_required_int(raw, "width"),
+            height=_required_int(raw, "height"),
+        ),
+        padding=_optional_int(raw, "padding", 0),
     )
 
 

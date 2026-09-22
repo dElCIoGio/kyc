@@ -34,6 +34,10 @@ class FieldValueProcessor:
         normalized = unicodedata.normalize("NFKC", value)
         if strategy in {"text", "name"}:
             return _collapse_whitespace(normalized)
+        if strategy == "residence":
+            return _strip_leading_label(normalized, "residência")
+        if strategy == "place_of_birth":
+            return _strip_leading_label(normalized, "natural de")
         if strategy == "document_id":
             return re.sub(r"\s+", "", normalized).upper()
         if strategy == "enum":
@@ -72,3 +76,7 @@ class FieldValueProcessor:
 def _collapse_whitespace(value: str) -> str:
     return " ".join(value.split())
 
+
+def _strip_leading_label(value: str, label: str) -> str:
+    pattern = rf"^\s*{re.escape(label)}\s*:\s*"
+    return _collapse_whitespace(re.sub(pattern, "", value, count=1, flags=re.IGNORECASE))

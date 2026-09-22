@@ -43,6 +43,13 @@ class FieldStatus(str, Enum):
     ERROR = "error"
 
 
+class QrCodeStatus(str, Enum):
+    DECODED = "decoded"
+    NOT_DETECTED = "not_detected"
+    DECODE_FAILED = "decode_failed"
+    PARSE_FAILED = "parse_failed"
+
+
 @dataclass(frozen=True)
 class Point:
     x: float
@@ -153,6 +160,12 @@ class FieldDefinition:
 
 
 @dataclass(frozen=True)
+class QrCodeDefinition:
+    bounding_box: BoundingBox
+    padding: int = 0
+
+
+@dataclass(frozen=True)
 class DocumentProfile:
     profile_id: str
     document_type: str
@@ -161,6 +174,7 @@ class DocumentProfile:
     canonical_height: int
     review_status: str
     fields: tuple[FieldDefinition, ...]
+    qr_code: QrCodeDefinition | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", tuple(self.fields))
@@ -265,6 +279,37 @@ class ExtractedField:
 
 
 @dataclass(frozen=True)
+class QrIdentityData:
+    full_name: str
+    id_number: str
+    birth_province: str
+    date_of_birth: str
+    sex: str
+    marital_status: str
+    issue_date: str
+    expiry_date: str
+    issuing_province: str
+    version: str
+
+
+@dataclass(frozen=True)
+class QrCodeResult:
+    status: QrCodeStatus
+    raw_payload: str | None
+    data: QrIdentityData | None
+    bounding_box: BoundingBox
+    decoder: str
+    decoder_version: str
+    variant_name: str | None
+    warnings: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "warnings", tuple(self.warnings))
+        if self.status == QrCodeStatus.DECODED and self.data is None:
+            raise ValueError("Decoded QR results require structured data")
+
+
+@dataclass(frozen=True)
 class PipelineIssue:
     stage: str
     code: str
@@ -285,6 +330,7 @@ class KycExtractionResult:
     fields: Mapping[str, ExtractedField]
     issues: tuple[PipelineIssue, ...]
     timings_ms: Mapping[str, float]
+    qr_code: QrCodeResult | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", immutable_mapping(self.fields))
@@ -318,6 +364,7 @@ class KycExtractionResult:
             "fields": {
                 name: _field_to_dict(value) for name, value in self.fields.items()
             },
+            "qr_code": _qr_code_to_dict(self.qr_code),
             "issues": [
                 {
                     "stage": issue.stage,
@@ -361,5 +408,39 @@ def _field_to_dict(value: ExtractedField) -> dict[str, Any]:
         "confidence": value.confidence,
         "selected_candidate": _candidate_to_dict(value.selected_candidate),
         "alternatives": [_candidate_to_dict(item) for item in value.alternatives],
+        "warnings": list(value.warnings),
+    }
+
+
+def _qr_code_to_dict(value: QrCodeResult | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    data = None
+    if value.data is not None:
+        data = {
+            "full_name": value.data.full_name,
+            "id_number": value.data.id_number,
+            "birth_province": value.data.birth_province,
+            "date_of_birth": value.data.date_of_birth,
+            "sex": value.data.sex,
+            "marital_status": value.data.marital_status,
+            "issue_date": value.data.issue_date,
+            "expiry_date": value.data.expiry_date,
+            "issuing_province": value.data.issuing_province,
+            "version": value.data.version,
+        }
+    return {
+        "status": value.status.value,
+        "raw_payload": value.raw_payload,
+        "data": data,
+        "bounding_box": {
+            "x": value.bounding_box.x,
+            "y": value.bounding_box.y,
+            "width": value.bounding_box.width,
+            "height": value.bounding_box.height,
+        },
+        "decoder": value.decoder,
+        "decoder_version": value.decoder_version,
+        "variant_name": value.variant_name,
         "warnings": list(value.warnings),
     }

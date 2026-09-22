@@ -9,6 +9,12 @@ class KycPipeline:
     def process(self, source: ImageSource) -> KycExtractionResult: ...
 
 ImageSource = Path | str | bytes | NDArray[np.uint8]
+
+For a complete two-sided document, `DocumentCoordinator` accepts explicitly labelled
+front and back sources and returns a `DocumentExtractionResult`. Its `front` and
+`back` members retain the complete side-specific `KycExtractionResult` values;
+fields are not flattened or reconciled across sides. Missing or failed sides make
+the document result partial when another side remains usable.
 ```
 
 Invalid caller types and invalid configuration raise exceptions. Expected image-processing failures return `KycExtractionResult(status="failed")` with a machine-readable issue.
@@ -22,7 +28,7 @@ Invalid caller types and invalid configuration raise exceptions. Expected image-
 
 ## Profile Contracts
 
-- `DocumentProfile`: profile identity, document type/side, canonical dimensions, review status, and ordered fields.
+- `DocumentProfile`: profile identity, document type/side, canonical dimensions, review status, ordered fields, and an optional QR region.
 - `FieldDefinition`: absolute canonical box, padding, required state, value type, OCR mode, comparison, normalizer, and validator.
 - `FieldCrop`: one field from one variant with exact box and OCR mode.
 
@@ -44,6 +50,8 @@ Balanced mode emits at most ten variants and always retains the original before 
 - `ExtractedField`: raw and optional normalized values, field state, confidence, selected candidate, alternatives, and warnings.
 - `PipelineIssue`: stage, stable code, warning/error severity, PII-safe message, and optional field name.
 - `KycExtractionResult`: schema version, `success | partial | failed`, profile/detection metadata, ordered field mapping, issues, and stage timings.
+- `QrCodeResult`: optional back-side QR payload, independently parsed QR record, canonical QR box, decoder provenance, and a QR-specific status. It does not participate in OCR reconciliation.
+- `DocumentExtractionResult`: coordinator schema version, overall status, nested front/back results, coordinator issues, and side timings.
 
 `KycExtractionResult.to_dict()` deliberately omits source images, normalized images, crops, paths, EXIF, and stack traces.
 

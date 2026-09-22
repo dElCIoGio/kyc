@@ -12,11 +12,16 @@ from .contracts import (
     PipelineIssue,
     Point,
     ProcessingStatus,
+    QrCodeResult,
+    QrCodeStatus,
+    QrIdentityData,
     Quadrilateral,
 )
 from .pipeline import KycPipeline
+from .coordinator import DocumentCoordinator, DocumentExtractionResult
 from .onnx_detection import OnnxDetectorManifest, OnnxDocumentDetector
 from .ocr import PaddleOcrModelManifest, PaddleOCRTextRecognizer, TextRecognizer
+from .qr import QrCodeExtractor
 
 __all__ = [
     "BoundingBox",
@@ -27,6 +32,8 @@ __all__ = [
     "InputImage",
     "KycExtractionResult",
     "KycPipeline",
+    "DocumentCoordinator",
+    "DocumentExtractionResult",
     "OCRCandidate",
     "OnnxDetectorManifest",
     "OnnxDocumentDetector",
@@ -35,6 +42,10 @@ __all__ = [
     "PipelineIssue",
     "Point",
     "ProcessingStatus",
+    "QrCodeExtractor",
+    "QrCodeResult",
+    "QrCodeStatus",
+    "QrIdentityData",
     "Quadrilateral",
     "TextRecognizer",
 ]

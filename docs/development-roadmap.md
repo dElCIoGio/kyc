@@ -5,7 +5,7 @@
 | Milestone | Status | Remaining release gate |
 | --- | --- | --- |
 | 1. Repository hygiene and documentation | Complete | Continue enforcing the private-data policy. |
-| 2. Root `kyc_engine` package | Implemented | Retire legacy `app/` imports after consumers migrate. |
+| 2. Root `kyc_engine` package | Implemented | Sole supported library package under `src/kyc_engine`. |
 | 3. Secure image intake | Implemented | Add a deployment-level hard wall-clock timeout and benchmark adversarial decodes. |
 | 4. Card detection | Implemented for development | Train/provision private RTMDet + corner models and qualify ONNX accuracy. |
 | 5. Perspective normalization | Implemented | Calibrate orientation anchors or use qualified semantic corner output. |
@@ -14,8 +14,9 @@
 | 8. Local OCR adapter | Implemented | Benchmark Portuguese model choices, pin selected artifacts, and test live inference. |
 | 9. Candidate reconciliation | Implemented | Calibrate conflict margins against private validation results. |
 | 10. Field normalization/validation | Implemented conservatively | Add Angolan document-number rules only from an authoritative specification. |
-| 11. Core orchestration | Implemented | Production CLI, APIs, queues, and persistence remain intentionally deferred. |
+| 11. Core orchestration | Implemented | Side-specific pipelines and a two-sided document coordinator are available; production CLI, APIs, queues, and persistence remain intentionally deferred. |
 | 12. Private accuracy/performance evaluation | Pending external data | Define release thresholds and demonstrate p95 CPU latency under ten seconds. |
+| 13. Local HTTP orchestration service | Implemented | Single-process, memory-only sessions; shared queues, durable stores, and user identity remain deferred. |
 
 ## Next Work
 

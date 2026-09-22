@@ -6,7 +6,12 @@ from PIL import Image
 
 from kyc_engine.contracts import BoundingBox, DocumentProfile, FieldDefinition
 from kyc_engine.intake import ImageIntake, IntakeError, IntakeLimits
-from kyc_engine.profiles import ProfileRegistry, load_default_profile, validate_profile
+from kyc_engine.profiles import (
+    ProfileRegistry,
+    load_default_profile,
+    load_default_profiles,
+    validate_profile,
+)
 
 
 class ProfileTests(unittest.TestCase):
@@ -23,12 +28,38 @@ class ProfileTests(unittest.TestCase):
             ("full_name", "id_number"),
             tuple(field.name for field in profile.fields if field.required),
         )
+        father_name = next(field for field in profile.fields if field.name == "father_name")
+        self.assertEqual(BoundingBox(42, 280, 300, 52), father_name.bounding_box)
+        self.assertEqual(0, father_name.padding)
 
     def test_rejects_duplicate_fields(self) -> None:
         field = FieldDefinition("name", BoundingBox(0, 0, 10, 10))
         profile = DocumentProfile("p", "doc", "front", 100, 50, "reviewed", (field, field))
         with self.assertRaisesRegex(ValueError, "Duplicate"):
             validate_profile(profile)
+
+    def test_loads_provisional_back_profile(self) -> None:
+        profile = next(item for item in load_default_profiles() if item.side == "back")
+        self.assertEqual("ao_id_card/back/v1", profile.profile_id)
+        self.assertEqual((718, 467), (profile.canonical_width, profile.canonical_height))
+        self.assertEqual(
+            (
+                "residence",
+                "place_of_birth",
+                "province",
+                "date_of_birth",
+                "sex",
+                "height_meters",
+                "marital_status",
+                "issue_date",
+                "expiry_date",
+            ),
+            tuple(field.name for field in profile.fields),
+        )
+        self.assertEqual("provisional", profile.review_status)
+        date_of_birth = next(field for field in profile.fields if field.name == "date_of_birth")
+        self.assertEqual(BoundingBox(248, 188, 102, 26), date_of_birth.bounding_box)
+        self.assertEqual(BoundingBox(494, 276, 166, 166), profile.qr_code.bounding_box if profile.qr_code else None)
 
     def test_registry_resolves_document_and_side(self) -> None:
         profile = load_default_profile()

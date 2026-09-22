@@ -10,6 +10,8 @@ from .contracts import (
     KycExtractionResult,
     PipelineIssue,
     ProcessingStatus,
+    QrCodeResult,
+    QrCodeStatus,
 )
 from .detection import DetectionError, DocumentDetector
 from .fields import FieldLocalizationError, FieldLocalizer
@@ -18,6 +20,7 @@ from .normalization import DocumentNormalizer, NormalizationError
 from .ocr import TextRecognizer
 from .profiles import ProfileRegistry
 from .quality import QualityAssessmentPipeline, StructuralQualityGate
+from .qr import QrCodeExtractor
 from .reconciliation import CandidateReconciler
 from .variants import BalancedVariantPolicy
 
@@ -36,6 +39,7 @@ class KycPipeline:
         localizer: FieldLocalizer,
         recognizer: TextRecognizer,
         reconciler: CandidateReconciler,
+        qr_extractor: QrCodeExtractor | None = None,
     ) -> None:
         self.intake = intake
         self.detector = detector
@@ -47,6 +51,7 @@ class KycPipeline:
         self.localizer = localizer
         self.recognizer = recognizer
         self.reconciler = reconciler
+        self.qr_extractor = qr_extractor or QrCodeExtractor()
 
     def process(self, source: ImageSource) -> KycExtractionResult:
         processing_id = uuid4().hex
@@ -143,6 +148,34 @@ class KycPipeline:
                 profile_id=profile.profile_id,
             )
 
+        qr_code: QrCodeResult | None = None
+        if profile.qr_code is not None:
+            try:
+                qr_code = _timed(
+                    "qr",
+                    timings,
+                    lambda: self.qr_extractor.extract(usable_batches, profile.qr_code),
+                )
+            except Exception:
+                issues.append(
+                    PipelineIssue(
+                        stage="qr",
+                        code="QR_PROCESSING_FAILED",
+                        severity=IssueSeverity.ERROR,
+                        message="The local QR decoder could not process the configured QR region",
+                    )
+                )
+            else:
+                if qr_code.status != QrCodeStatus.DECODED:
+                    issues.append(
+                        PipelineIssue(
+                            stage="qr",
+                            code=_qr_issue_code(qr_code.status),
+                            severity=IssueSeverity.ERROR,
+                            message="The configured QR code could not be decoded into a structured record",
+                        )
+                    )
+
         try:
             crops = _timed(
                 "field_localization",
@@ -191,7 +224,7 @@ class KycPipeline:
             else ProcessingStatus.SUCCESS
         )
         return KycExtractionResult(
-            schema_version="1.0",
+            schema_version="1.1",
             processing_id=processing_id,
             status=status,
             document_type=detection.document_type,
@@ -201,6 +234,7 @@ class KycPipeline:
             fields=reconciled.fields,
             issues=tuple(issues),
             timings_ms=timings,
+            qr_code=qr_code,
         )
 
 
@@ -223,7 +257,7 @@ def _failed(
     profile_id: str | None = None,
 ) -> KycExtractionResult:
     return KycExtractionResult(
-        schema_version="1.0",
+        schema_version="1.1",
         processing_id=processing_id,
         status=ProcessingStatus.FAILED,
         document_type=getattr(detection, "document_type", None),
@@ -242,3 +276,10 @@ def _failed(
         timings_ms=timings,
     )
 
+
+def _qr_issue_code(status: QrCodeStatus) -> str:
+    return {
+        QrCodeStatus.NOT_DETECTED: "QR_NOT_DETECTED",
+        QrCodeStatus.DECODE_FAILED: "QR_DECODE_FAILED",
+        QrCodeStatus.PARSE_FAILED: "QR_PARSE_FAILED",
+    }[status]

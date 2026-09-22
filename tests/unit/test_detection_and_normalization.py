@@ -31,6 +31,10 @@ class DetectionTests(unittest.TestCase):
         self.assertGreaterEqual(result.confidence, 0.48)
         self.assertEqual(4, len(result.corners.points))
 
+    def test_back_detector_preserves_requested_side(self) -> None:
+        result = OpenCVDocumentDetector(side="back").detect(synthetic_scene())
+        self.assertEqual("back", result.side)
+
     def test_rejects_image_without_document(self) -> None:
         with self.assertRaises(DetectionError) as raised:
             OpenCVDocumentDetector().detect(np.zeros((300, 400, 3), dtype=np.uint8))

@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-manifest", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--device")
+    parser.add_argument("--side", choices=("front", "back"), default="front")
     return parser
 
 
@@ -43,6 +44,7 @@ def main(
             pipeline = pipeline_factory(
                 model_manifest=args.model_manifest,
                 device=args.device,
+                side=args.side,
             )
     except (ImportError, OSError, TypeError, ValueError):
         print("calibration_failed=MODEL_CONFIGURATION_FAILED")
@@ -86,6 +88,7 @@ def _print_safe_summary(result: KycExtractionResult) -> None:
     timings: dict[str, Any] = dict(result.timings_ms)
     print(f"status={result.status.value}")
     print(f"field_status_counts={dict(sorted(statuses.items()))}")
+    print(f"qr_status={result.qr_code.status.value if result.qr_code is not None else 'not_configured'}")
     print(f"issue_codes={issue_codes}")
     print(f"timings_ms={dict(sorted(timings.items()))}")
 

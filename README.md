@@ -1,6 +1,6 @@
 # Angolan ID Core Engine
 
-This repository contains an offline Python 3.12 core for detecting one front-side Angolan identity card, normalizing its perspective, reading configured text fields, and returning a structured result with complete candidate provenance.
+This repository contains an offline Python 3.12 core for detecting one Angolan identity-card side, normalizing its perspective, reading configured text fields, and returning a structured result with complete candidate provenance.
 
 ```text
 secure intake -> card detection -> perspective normalization -> variants
@@ -20,10 +20,11 @@ The canonical implementation is in `src/kyc_engine` and provides:
 - perspective normalization with forward and inverse transforms;
 - a balanced ten-variant OCR policy and five quality assessors;
 - profile-driven field crops and a local PaddleOCR adapter;
+- local QR extraction and structured back-side QR payload parsing;
 - deterministic reconciliation, conservative normalization, and validation;
 - a synchronous `KycPipeline` returning immutable, serializable contracts.
 
-The checked-in `ao_id_card/front/v1` profile is **provisional**. It currently targets the visible front-side textual fields in the available card sample, but its geometry must still be adjusted and signed off against authoritative layout information before production use. ML weights and private accuracy data are deliberately outside Git. The older modules under `app/` remain available while consumers migrate to the root package.
+The checked-in `ao_id_card/front/v1` and `ao_id_card/back/v1` profiles are **provisional**. Their geometry is calibrated only against private samples and must be reviewed against authoritative layout information before production use. ML weights and private accuracy data are deliberately outside Git. The installable library under `src/kyc_engine` is the sole supported implementation.
 
 ## Setup
 
@@ -57,6 +58,34 @@ payload = result.to_dict()
 ```
 
 `build_balanced_pipeline()` accepts a fake or alternative `TextRecognizer` for tests. `build_paddle_pipeline()` validates a local OCR artifact manifest before initializing PaddleOCR and never downloads models. An `OnnxDocumentDetector` can be passed explicitly after loading its manifest. The OpenCV detector is the development default and must not be treated as production-qualified.
+
+To process both private card images with the configured document coordinator, place
+the front image at `private-data/ao-id-front/front.jpeg` and the back image at
+`private-data/ao-id-back/back.jpeg`, then run:
+
+```powershell
+$env:PYTHONPATH = "src"
+python scripts/run_document_coordinator.py
+```
+
+The structured result is written to the ignored
+`private-data/document-coordinator-result.json`. Override the defaults with
+`--front`, `--back`, `--model-manifest`, or `--output` when needed.
+
+## FastAPI Service
+
+The separate [`api`](api/README.md) project installs this library and exposes a
+session-based HTTP workflow for uploading labelled card sides, starting an
+in-memory extraction job, polling status, and retrieving the nested coordinator
+result. It uses API-key authentication and does not persist uploads or results.
+
+```powershell
+python -m pip install -e ".[ocr]"
+python -m pip install -e "api[dev]"
+$env:KYC_API_KEY = "replace-with-a-long-random-secret"
+$env:KYC_OCR_MODEL_MANIFEST = "private-models\paddleocr\ao-id-front-v5-mobile\manifest.json"
+uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-access-log
+```
 
 ## Data Safety
 

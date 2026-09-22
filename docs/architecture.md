@@ -36,6 +36,12 @@ Path | bytes | NDArray[uint8]
   -> KycExtractionResult
 ```
 
+For a two-sided document, `DocumentCoordinator` runs the front pipeline first and
+the back pipeline second when those sources are supplied. It preserves each side's
+result as-is and assembles them into a nested `DocumentExtractionResult`. The
+coordinator does not auto-detect side, compare front/back values, or reconcile QR
+data with OCR data.
+
 Image-bearing contracts hold read-only arrays. Intake copies caller arrays, generators produce new arrays, assessors receive copies, and serialized results contain no pixels.
 
 ## Package Layout
@@ -54,6 +60,7 @@ src/kyc_engine/
   ocr.py
   reconciliation.py
   validation.py
+  coordinator.py
   profiles.py
   pipeline.py
   defaults.py
@@ -77,6 +84,21 @@ The versioned profile supplies canonical dimensions, field boxes, padding, requi
 
 The current profile is intentionally marked `provisional`. Production extraction acceptance criteria remain blocked until the complete front-side inventory and geometry are confirmed from authoritative sources.
 
-## Legacy Components
+## Library Boundary
 
-`app/workers/image_processor` and `app/field-extractor` remain as temporary compatibility surfaces. The root package is now canonical for new development. Their test suites continue to run until downstream imports and the old image-processing CLI are retired deliberately.
+`src/kyc_engine` is the sole supported implementation and installable package.
+The repository-level `tests/` suite is the compatibility boundary for all public
+contracts. Diagnostic scripts under `scripts/` are development tools and are not
+part of the library API.
+
+## HTTP Service Boundary
+
+The separate `api/` project depends on the installed library and owns HTTP
+authentication, bounded multipart intake, session state, background job
+execution, expiry, and HTTP error mapping. It passes in-memory bytes to
+`DocumentCoordinator` and returns `DocumentExtractionResult.to_dict()` only from
+the authenticated result endpoint. It does not duplicate extraction stages or
+modify library results.
+
+The first API deployment is deliberately single-process. Its session store and
+job queue are in memory, so multiple server workers would create isolated state.

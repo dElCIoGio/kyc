@@ -14,6 +14,7 @@ from kyc_engine.contracts import (
 from kyc_engine.fields import FieldLocalizer
 from kyc_engine.quality import QualityAssessmentPipeline, StructuralQualityGate
 from kyc_engine.reconciliation import CandidateReconciler
+from kyc_engine.validation import FieldValueProcessor
 from kyc_engine.variants import BalancedVariantPolicy
 
 
@@ -93,6 +94,19 @@ class FieldTests(unittest.TestCase):
             bounding_box=self.field.bounding_box,
             ocr_engine="fake",
             ocr_model_version="1",
+        )
+
+
+class FieldValueProcessorTests(unittest.TestCase):
+    def test_removes_back_side_labels_before_normalization(self) -> None:
+        processor = FieldValueProcessor()
+        self.assertEqual(
+            "RUA EXEMPLO 10",
+            processor.normalize("residence", "Residência:  RUA EXEMPLO 10"),
+        )
+        self.assertEqual(
+            "LUANDA",
+            processor.normalize("place_of_birth", "Natural de: LUANDA"),
         )
 
 

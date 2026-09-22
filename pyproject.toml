@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.0,<3",
     "opencv-python-headless>=4.10,<5",
     "Pillow>=11,<13",
+    "zxing-cpp>=3.1,<4",
 ]
 
 [project.optional-dependencies]
@@ -27,4 +28,3 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 kyc_engine = ["configs/*.json"]
-

@@ -29,6 +29,11 @@ class ClassicalDetectionConfig:
     fallback_min_rectangularity: float = 0.50
     min_confidence: float = 0.48
     max_processing_side: int = 1400
+    light_mask_max_saturation: int = 25
+    light_mask_min_value: int = 100
+    light_mask_kernel_size: int = 15
+    light_mask_border_expansion_ratio: float = 0.09
+    ambiguity_confidence_margin: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -43,8 +48,18 @@ class OpenCVDocumentDetector:
     name = "opencv_quadrilateral"
     version = "1"
 
-    def __init__(self, config: ClassicalDetectionConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ClassicalDetectionConfig | None = None,
+        *,
+        side: str = "front",
+    ) -> None:
+        if side not in {"front", "back"}:
+            raise ValueError("Document side must be 'front' or 'back'")
+        if not 0 <= (config or ClassicalDetectionConfig()).light_mask_border_expansion_ratio < 0.25:
+            raise ValueError("Light-mask border expansion ratio must be between 0 and 0.25")
         self.config = config or ClassicalDetectionConfig()
+        self.side = side
 
     def detect(self, image: Image) -> DetectionResult:
         if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
@@ -59,17 +74,32 @@ class OpenCVDocumentDetector:
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         candidates = self._build_candidates(contours, resized.shape[:2], scale)
-        if not candidates:
-            candidates = self._build_rotated_rect_candidates(
+        candidates.extend(
+            self._build_rotated_rect_candidates(
                 self._fallback_contours(gray),
                 resized.shape[:2],
                 scale,
             )
-        candidates = self._suppress_duplicates(candidates)
+        )
+        candidates.extend(
+            self._build_rotated_rect_candidates(
+                self._light_mask_contours(resized),
+                resized.shape[:2],
+                scale,
+                border_expansion_ratio=self.config.light_mask_border_expansion_ratio,
+            )
+        )
+        candidates = self._suppress_duplicates(
+            sorted(candidates, key=lambda item: item.confidence, reverse=True)
+        )
         plausible = [item for item in candidates if item.confidence >= self.config.min_confidence]
         if not plausible:
             raise DetectionError("DOCUMENT_NOT_DETECTED", "No supported document was detected")
-        if len(plausible) > 1:
+        if (
+            len(plausible) > 1
+            and plausible[0].confidence - plausible[1].confidence
+            < self.config.ambiguity_confidence_margin
+        ):
             raise DetectionError(
                 "MULTIPLE_DOCUMENTS",
                 "Multiple plausible documents were detected",
@@ -78,7 +108,7 @@ class OpenCVDocumentDetector:
         selected = plausible[0]
         return DetectionResult(
             document_type="ao_id_card",
-            side="front",
+            side=self.side,
             confidence=selected.confidence,
             corners=selected.corners,
             detector=self.name,
@@ -106,6 +136,22 @@ class OpenCVDocumentDetector:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
         closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
         contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        return list(contours)
+
+    def _light_mask_contours(self, image: Image) -> list[np.ndarray]:
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(
+            hsv,
+            np.array([0, 0, self.config.light_mask_min_value], dtype=np.uint8),
+            np.array([180, self.config.light_mask_max_saturation, 255], dtype=np.uint8),
+        )
+        kernel_size = self.config.light_mask_kernel_size
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (kernel_size, kernel_size),
+        )
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         return list(contours)
 
     def _build_candidates(
@@ -169,6 +215,8 @@ class OpenCVDocumentDetector:
         contours: tuple[np.ndarray, ...] | list[np.ndarray],
         shape: tuple[int, int],
         scale: float,
+        *,
+        border_expansion_ratio: float = 0.0,
     ) -> list[_Candidate]:
         height, width = shape
         image_area = float(width * height)
@@ -194,7 +242,12 @@ class OpenCVDocumentDetector:
                 max(0.0, min(1.0, 0.45 * aspect_score + 0.40 * rectangularity + 0.15 * area_score))
             )
             raw_points = cv2.boxPoints(rect).astype(np.float32)
-            ordered = order_corners(raw_points)
+            ordered = _expand_quadrilateral(
+                order_corners(raw_points),
+                border_expansion_ratio,
+                width,
+                height,
+            )
             restored = ordered / scale
             corners = Quadrilateral(
                 tuple(Point(float(x), float(y)) for x, y in restored)  # type: ignore[arg-type]
@@ -245,6 +298,21 @@ def _side_lengths(points: np.ndarray) -> tuple[float, float, float, float]:
         float(np.linalg.norm(points[(index + 1) % 4] - points[index]))
         for index in range(4)
     )  # type: ignore[return-value]
+
+
+def _expand_quadrilateral(
+    points: np.ndarray,
+    ratio: float,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    if ratio == 0:
+        return points
+    center = points.mean(axis=0)
+    expanded = center + (points - center) * (1 + ratio)
+    expanded[:, 0] = np.clip(expanded[:, 0], 0, width - 1)
+    expanded[:, 1] = np.clip(expanded[:, 1], 0, height - 1)
+    return expanded.astype(np.float32)
 
 
 def _right_angle_score(points: np.ndarray) -> float:

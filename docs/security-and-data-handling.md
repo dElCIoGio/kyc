@@ -54,6 +54,17 @@ Allowed logs include processing identifiers, stage names, durations, image dimen
 
 Diagnostic bundles containing images or OCR values are sensitive artifacts. They require an explicit opt-in destination, restrictive access, and a documented expiry process.
 
+## HTTP API
+
+- Require a constant-time compared environment API key for every `/v1/*` route.
+- Keep health responses public only when they contain no configuration, paths, session identifiers, or document data.
+- Bound request and image sizes and keep accepted multipart uploads below the in-memory spool threshold.
+- Store uploads and results only in the process-local session store; clear image bytes immediately after extraction.
+- Expire and delete complete session state, including results, after the configured TTL.
+- Keep status responses separate from the result endpoint so polling does not repeatedly disclose extracted identity values.
+- Run a single server process until sessions and jobs use a shared external backend.
+- Put TLS, network access controls, and deployment-level request-size/time limits in front of any non-local deployment.
+
 ## Dependency and Model Safety
 
 - Lock production dependencies and review updates to OpenCV, NumPy, Pillow, PaddleOCR, PaddlePaddle, and detector runtimes.
@@ -70,4 +81,3 @@ Diagnostic bundles containing images or OCR values are sensitive artifacts. They
 6. Rotate credentials if any were exposed and review how the file bypassed repository controls.
 
 History rewriting is intentionally not part of ordinary cleanup because it disrupts every clone and requires explicit coordination.
-

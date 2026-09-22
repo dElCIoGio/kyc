@@ -9,19 +9,7 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 ```
 
-The root suite covers bounded intake, profile validation, zero/one/multiple-card behavior, perspective transforms, the ten-variant policy, all five quality metrics, field crops, OCR mode batching, model manifests, reconciliation, failure states, result serialization, and input immutability.
-
-Temporary compatibility suites remain required:
-
-```powershell
-cd app/workers/image_processor
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
-
-```powershell
-cd app/field-extractor
-.\.venv\Scripts\python.exe extractor_test.py
-```
+The root suite covers bounded intake, profile validation, zero/one/multiple-card behavior, perspective transforms, the ten-variant policy, all five quality metrics, field crops, OCR mode batching, model manifests, reconciliation, coordinator behavior, failure states, result serialization, and input immutability.
 
 ## Invariants
 

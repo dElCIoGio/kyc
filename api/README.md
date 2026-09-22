@@ -50,7 +50,10 @@ uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-acc
 The repository-root Compose project packages this API and the installed engine
 in one container. It passes root `.env` values into the service and mounts the
 ignored `private-models/` directory read-only at `/models`; the mounted model
-manifest path is supplied automatically to the container.
+manifest path is supplied automatically to the container. The mounted files
+are the persistent model cache across container restarts. The build may fetch
+Python dependency wheels once, but PaddleOCR model weights are never downloaded
+by the service: missing or invalid local model directories fail startup.
 
 ```powershell
 Copy-Item .env.example .env

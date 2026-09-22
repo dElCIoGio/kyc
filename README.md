@@ -98,7 +98,10 @@ uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-acc
 The root [`docker-compose.yml`](docker-compose.yml) builds the installable
 engine and API together in one local service. Private OCR artifacts are never
 copied into the image: Compose mounts the ignored `private-models/` directory
-read-only at `/models`.
+read-only at `/models`. The image build may download Python package wheels on
+its first build, and Docker reuses its build cache afterwards. It never
+downloads PaddleOCR model weights: startup requires the mounted, checksum-
+verified model directories and fails if they are absent or invalid.
 
 ```powershell
 Copy-Item .env.example .env

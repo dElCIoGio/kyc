@@ -29,6 +29,8 @@ Optional settings and defaults:
 
 ```text
 KYC_OCR_DEVICE=cpu
+KYC_LOG_LEVEL=INFO
+KYC_ENVIRONMENT=development
 KYC_MAX_UPLOAD_BYTES=15728640
 KYC_SESSION_TTL_SECONDS=1800
 KYC_MAX_SESSIONS=100
@@ -71,6 +73,20 @@ pipelines during startup. Startup fails when configuration or model checks fail.
 `KYC_API_KEY` must be injected by the local environment or deployment secret
 store; never commit it. The complete multipart request body is bounded to the
 configured image limit plus 64 KiB of multipart overhead.
+
+## Application Logging
+
+Application logs are emitted to stdout as one JSON object per line, suitable for
+Docker and Railway collection. Every record includes a timestamp, level, logger,
+service, environment, and event; job lifecycle events may also include existing
+opaque session/job IDs, sides, status, and duration.
+
+Set `KYC_LOG_LEVEL` to a standard Python logging level (for example `DEBUG` or
+`WARNING`) and `KYC_ENVIRONMENT` to the deployment name. Logs never include
+request bodies, filenames, image bytes, OCR text, extracted values, QR payloads,
+or serialized results. Unexpected failures record the exception type and safe
+stack frames internally, but not exception-message text; API responses retain
+their existing generic error codes and messages.
 
 ## Session Workflow
 

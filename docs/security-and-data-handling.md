@@ -50,7 +50,7 @@ Identity-card photographs and extracted fields are sensitive personal data. The 
 
 ## Logging and Diagnostics
 
-Allowed logs include processing identifiers, stage names, durations, image dimensions after validation, model/profile versions, safe error codes, and aggregate counts. Logs must exclude pixels, field crops, OCR text, normalized field values, original filenames, user-provided paths, and stack traces that include sensitive payloads.
+Allowed logs include processing identifiers, stage names, durations, image dimensions after validation, model/profile versions, safe error codes, aggregate counts, and exception types. Logs must exclude pixels, field crops, OCR text, normalized field values, original filenames, user-provided paths, exception-message text, and arbitrary serialized objects. Application JSON logs may include stack-frame locations for unexpected exceptions, but never exception representations or locals that could contain sensitive payloads.
 
 Diagnostic bundles containing images or OCR values are sensitive artifacts. They require an explicit opt-in destination, restrictive access, and a documented expiry process.
 

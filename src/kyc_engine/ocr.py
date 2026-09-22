@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ import cv2
 import numpy as np
 
 from .contracts import FieldCrop, OCRCandidate
+
+
+logger = logging.getLogger(__name__)
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 _DEVICE_PATTERN = re.compile(r"^(cpu|gpu(?::[0-9]+)?)$")
@@ -283,7 +287,15 @@ class PaddleOCRTextRecognizer:
             return
         try:
             parsed = self._predict_and_combine(indexed_crops, predict, combine)
-        except Exception:
+        except Exception as exc:
+            logger.exception(
+                "OCR batch prediction failed; retrying fields individually",
+                extra={
+                    "event": "ocr_batch_prediction_failed",
+                    "stage": "ocr",
+                    "exception_type": type(exc).__name__,
+                },
+            )
             for index, crop in indexed_crops:
                 try:
                     text, confidence = self._predict_and_combine(
@@ -292,7 +304,16 @@ class PaddleOCRTextRecognizer:
                     candidates[index] = _candidate(
                         crop, text, confidence, self.name, self.model_version
                     )
-                except Exception:
+                except Exception as exc:
+                    logger.exception(
+                        "OCR field prediction failed",
+                        extra={
+                            "event": "ocr_field_prediction_failed",
+                            "stage": "ocr",
+                            "field": crop.field_name,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
                     candidates[index] = _failed_candidate(crop, self.name, self.model_version)
             return
 

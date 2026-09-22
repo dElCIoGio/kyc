@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -16,6 +17,9 @@ from .contracts import (
     VariantBatch,
     VariantInfo,
 )
+
+
+logger = logging.getLogger(__name__)
 
 _PREFERRED_VARIANTS = (
     "original",
@@ -101,7 +105,15 @@ class QrCodeExtractor:
                 np.ascontiguousarray(image.copy()),
                 formats=self._decoder.BarcodeFormat.QRCode,
             )
-        except Exception:
+        except Exception as exc:
+            logger.exception(
+                "QR decoder backend failed",
+                extra={
+                    "event": "qr_decode_backend_failed",
+                    "stage": "qr",
+                    "exception_type": type(exc).__name__,
+                },
+            )
             return None
         if barcode is None:
             return None

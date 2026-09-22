@@ -17,6 +17,8 @@ class ApiSettings(BaseSettings):
     api_key: SecretStr = Field(min_length=16)
     ocr_model_manifest: Path
     ocr_device: Literal["cpu", "gpu"] = "cpu"
+    log_level: str = "INFO"
+    environment: str = "development"
     max_upload_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
     max_sessions: int = Field(default=100, gt=0)

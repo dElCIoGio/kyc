@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from concurrent.futures import Executor
 from contextlib import asynccontextmanager, suppress
@@ -16,6 +17,7 @@ from . import __version__
 from .auth import require_api_key
 from .composition import create_coordinator
 from .jobs import JobCapacityExceeded, JobManager
+from .logging import configure_logging
 from .metrics import MetricsRegistry
 from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware
 from .models import (
@@ -42,6 +44,7 @@ from .settings import ApiSettings
 
 _ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png"}
 _ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png"}
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -56,25 +59,39 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         resolved_settings = settings or ApiSettings()  # type: ignore[call-arg]
-        resolved_store = session_store or SessionStore(
-            ttl_seconds=resolved_settings.session_ttl_seconds,
-            max_sessions=resolved_settings.max_sessions,
+        configure_logging(
+            level=resolved_settings.log_level,
+            environment=resolved_settings.environment,
         )
-        resolved_coordinator = coordinator or create_coordinator(resolved_settings)
-        resolved_metrics = metrics or MetricsRegistry()
-        resolved_rate_limiter = rate_limiter or ApiKeyRateLimiter(
-            max_requests=resolved_settings.rate_limit_requests,
-            window_seconds=resolved_settings.rate_limit_window_seconds,
-        )
-        manager = JobManager(
-            resolved_coordinator,
-            resolved_store,
-            workers=resolved_settings.job_workers,
-            capacity=resolved_settings.max_sessions,
-            timeout_seconds=resolved_settings.job_timeout_seconds,
-            metrics=resolved_metrics,
-            executor=executor,
-        )
+        try:
+            resolved_store = session_store or SessionStore(
+                ttl_seconds=resolved_settings.session_ttl_seconds,
+                max_sessions=resolved_settings.max_sessions,
+            )
+            resolved_coordinator = coordinator or create_coordinator(resolved_settings)
+            resolved_metrics = metrics or MetricsRegistry()
+            resolved_rate_limiter = rate_limiter or ApiKeyRateLimiter(
+                max_requests=resolved_settings.rate_limit_requests,
+                window_seconds=resolved_settings.rate_limit_window_seconds,
+            )
+            manager = JobManager(
+                resolved_coordinator,
+                resolved_store,
+                workers=resolved_settings.job_workers,
+                capacity=resolved_settings.max_sessions,
+                timeout_seconds=resolved_settings.job_timeout_seconds,
+                metrics=resolved_metrics,
+                executor=executor,
+            )
+        except Exception as exc:
+            logger.exception(
+                "application startup failed",
+                extra={
+                    "event": "application_startup_failed",
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            raise
 
         old_spool_size = MultiPartParser.spool_max_size
         old_part_size = MultiPartParser.max_part_size
@@ -93,6 +110,7 @@ def create_app(
                 resolved_settings.session_cleanup_interval_seconds,
             )
         )
+        logger.info("application started", extra={"event": "application_started"})
         try:
             yield
         finally:
@@ -320,8 +338,16 @@ def _install_error_handlers(application: FastAPI) -> None:
         return _error_response(500, "JOB_FAILED", "Document extraction failed")
 
     @application.exception_handler(Exception)
-    async def unexpected_error(request: Request, _exc: Exception) -> JSONResponse:
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         _record_error(request, "INTERNAL_ERROR")
+        logger.exception(
+            "unexpected HTTP request failure",
+            extra={
+                "event": "http_request_failed",
+                "error_code": "INTERNAL_ERROR",
+                "exception_type": type(exc).__name__,
+            },
+        )
         return _error_response(500, "INTERNAL_ERROR", "The request could not be completed")
 
 

@@ -7,10 +7,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Paddle's CPU runtime uses OpenMP. Model artifacts are mounted at runtime and
-# deliberately excluded from the build context.
+# Paddle's CPU runtime uses OpenMP, while OpenCV's binary extension needs the
+# GL and GLib runtime libraries even though this service is headless. Model
+# artifacts are mounted at runtime and deliberately excluded from the image.
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends libgomp1 \
+  && apt-get install --yes --no-install-recommends \
+    libglib2.0-0 \
+    libgl1 \
+    libgomp1 \
   && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./

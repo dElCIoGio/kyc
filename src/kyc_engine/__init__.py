@@ -1,5 +1,9 @@
 """Offline Angolan ID extraction engine."""
 
+import logging
+
+logging.getLogger(__name__).addHandler(logging.NullHandler())
+
 from .contracts import (
     BoundingBox,
     DetectionResult,

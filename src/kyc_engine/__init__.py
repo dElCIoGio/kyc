@@ -6,6 +6,8 @@ from .contracts import (
     DocumentProfile,
     ExtractedField,
     FieldDefinition,
+    FieldStatus,
+    ImageSource,
     InputImage,
     KycExtractionResult,
     OCRCandidate,
@@ -17,8 +19,10 @@ from .contracts import (
     QrIdentityData,
     Quadrilateral,
 )
+from .intake import IntakeLimits
 from .pipeline import KycPipeline
 from .coordinator import DocumentCoordinator, DocumentExtractionResult
+from .defaults import build_paddle_document_coordinator
 from .onnx_detection import OnnxDetectorManifest, OnnxDocumentDetector
 from .ocr import PaddleOcrModelManifest, PaddleOCRTextRecognizer, TextRecognizer
 from .qr import QrCodeExtractor
@@ -29,9 +33,13 @@ __all__ = [
     "DocumentProfile",
     "ExtractedField",
     "FieldDefinition",
+    "FieldStatus",
+    "ImageSource",
     "InputImage",
+    "IntakeLimits",
     "KycExtractionResult",
     "KycPipeline",
+    "build_paddle_document_coordinator",
     "DocumentCoordinator",
     "DocumentExtractionResult",
     "OCRCandidate",

@@ -43,21 +43,27 @@ Install optional local inference dependencies only where needed:
 
 The OCR and ONNX adapters require explicit local model paths and validate configured checksums. Processing never downloads a model.
 
-## Python Use
+## Python Library
 
 ```python
 from pathlib import Path
 
-from kyc_engine.defaults import build_paddle_pipeline
+from kyc_engine import build_paddle_document_coordinator
 
-pipeline = build_paddle_pipeline(
+coordinator = build_paddle_document_coordinator(
     model_manifest=Path("private-models/paddleocr/ao-id-front-v5-mobile/manifest.json"),
+    device="cpu",
 )
-result = pipeline.process(Path("private-input/card.png"))
+result = coordinator.process(
+    front=Path("private-input/front.jpeg"),
+    back=Path("private-input/back.jpeg"),
+)
 payload = result.to_dict()
 ```
 
-`build_balanced_pipeline()` accepts a fake or alternative `TextRecognizer` for tests. `build_paddle_pipeline()` validates a local OCR artifact manifest before initializing PaddleOCR and never downloads models. An `OnnxDocumentDetector` can be passed explicitly after loading its manifest. The OpenCV detector is the development default and must not be treated as production-qualified.
+`build_paddle_document_coordinator()` is the supported consumer entry point. It accepts paths, encoded bytes, or `uint8` NumPy arrays for either labelled side and returns a nested `DocumentExtractionResult`.
+
+The default OpenCV detector is development-grade. Supply qualified front and back detector instances explicitly before treating the result as production-grade. The lower-level `build_balanced_pipeline()` and `build_paddle_pipeline()` functions remain available for advanced composition and tests; they validate local OCR manifests and never download models.
 
 To process both private card images with the configured document coordinator, place
 the front image at `private-data/ao-id-front/front.jpeg` and the back image at
@@ -94,6 +100,7 @@ Only synthetic or irreversibly redacted identity-document fixtures may enter Git
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Library usage](docs/library-usage.md)
 - [Stage contracts](docs/contracts.md)
 - [Security and data handling](docs/security-and-data-handling.md)
 - [Development roadmap](docs/development-roadmap.md)

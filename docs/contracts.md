@@ -5,8 +5,11 @@ The contracts in `src/kyc_engine/contracts.py` are frozen dataclasses. Collectio
 ## Entry Point
 
 ```python
-class KycPipeline:
-    def process(self, source: ImageSource) -> KycExtractionResult: ...
+coordinator = build_paddle_document_coordinator(
+    model_manifest=Path("local-manifest.json"),
+    device="cpu",
+)
+result = coordinator.process(front=front_source, back=back_source)
 
 ImageSource = Path | str | bytes | NDArray[np.uint8]
 
@@ -18,6 +21,11 @@ the document result partial when another side remains usable.
 ```
 
 Invalid caller types and invalid configuration raise exceptions. Expected image-processing failures return `KycExtractionResult(status="failed")` with a machine-readable issue.
+
+`build_paddle_document_coordinator()` is the supported consumer factory. It
+accepts optional per-side detector injection and `IntakeLimits`; its default
+OpenCV detectors are development-grade. `KycPipeline`, `build_paddle_pipeline()`,
+and `build_balanced_pipeline()` remain advanced composition APIs.
 
 ## Image and Geometry Contracts
 

@@ -8,8 +8,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from kyc_engine.coordinator import DocumentCoordinator, DocumentExtractionResult
-from kyc_engine.defaults import build_paddle_pipeline
+from kyc_engine import DocumentExtractionResult, build_paddle_document_coordinator
 
 
 # Put the two private card images in these locations, or override them on the
@@ -49,15 +48,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         with _suppress_backend_output():
-            front_pipeline = build_paddle_pipeline(
+            coordinator = build_paddle_document_coordinator(
                 model_manifest=args.model_manifest,
                 device=args.device,
-                side="front",
-            )
-            back_pipeline = build_paddle_pipeline(
-                model_manifest=args.model_manifest,
-                device=args.device,
-                side="back",
             )
     except (ImportError, OSError, TypeError, ValueError):
         print("coordinator_failed=MODEL_CONFIGURATION_FAILED")
@@ -65,7 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         with _suppress_backend_output():
-            result = DocumentCoordinator(front_pipeline, back_pipeline).process(
+            result = coordinator.process(
                 front=args.front,
                 back=args.back,
             )

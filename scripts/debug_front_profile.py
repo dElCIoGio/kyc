@@ -5,6 +5,7 @@ from pathlib import Path
 
 import cv2
 
+from kyc_engine.contracts import Image, Quadrilateral
 from kyc_engine.detection import OpenCVDocumentDetector
 from kyc_engine.fields import FieldLocalizer
 from kyc_engine.intake import ImageIntake
@@ -29,13 +30,27 @@ def main() -> int:
 
     profile = load_default_profile()
     intake = ImageIntake().load(args.image)
-    detection = OpenCVDocumentDetector().detect(intake.image)
+    detection, geometry_debug = OpenCVDocumentDetector().detect_with_debug(intake.image)
     normalized = DocumentNormalizer().normalize(intake.image, detection, profile)
     batches = BalancedVariantPolicy().generate(normalized.image)
     assessments = QualityAssessmentPipeline().assess(batches)
     crops = FieldLocalizer().localize(batches, profile)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    geometry_overlay = intake.image.copy()
+    _draw_quadrilateral(
+        geometry_overlay,
+        geometry_debug.coarse_corners,
+        color=(0, 165, 255),
+        label="coarse",
+    )
+    _draw_quadrilateral(
+        geometry_overlay,
+        geometry_debug.final_corners,
+        color=(0, 255, 0),
+        label="final",
+    )
+    cv2.imwrite(str(args.output_dir / "front_geometry_overlay.png"), geometry_overlay)
     cv2.imwrite(str(args.output_dir / "normalized_front.png"), normalized.image)
 
     overlay = normalized.image.copy()
@@ -61,6 +76,9 @@ def main() -> int:
     cv2.imwrite(str(args.output_dir / "field_overlay.png"), overlay)
 
     print(f"detection_confidence={detection.confidence:.4f}")
+    print(f"candidate_type={geometry_debug.candidate_kind}")
+    print(f"refinement_accepted={geometry_debug.refinement_accepted}")
+    print(f"edge_support={dict(geometry_debug.edge_support)}")
     print(f"components={dict(detection.confidence_components)}")
     print(
         "corners="
@@ -72,6 +90,28 @@ def main() -> int:
     print(f"field_crops={len(crops)}")
     print(f"debug_dir={args.output_dir}")
     return 0
+
+
+def _draw_quadrilateral(
+    image: Image,
+    corners: Quadrilateral,
+    *,
+    color: tuple[int, int, int],
+    label: str,
+) -> None:
+    points = corners.as_array().round().astype("int32")
+    cv2.polylines(image, (points,), True, color, 3, cv2.LINE_AA)
+    x, y = points[0]
+    cv2.putText(
+        image,
+        label,
+        (int(x), max(18, int(y) - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
 
 
 if __name__ == "__main__":

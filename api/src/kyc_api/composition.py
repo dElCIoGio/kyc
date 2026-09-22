@@ -3,25 +3,17 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
-from kyc_engine import DocumentCoordinator
-from kyc_engine.defaults import build_paddle_pipeline
+from kyc_engine import DocumentCoordinator, build_paddle_document_coordinator
 
 from .settings import ApiSettings
 
 
 def create_coordinator(settings: ApiSettings) -> DocumentCoordinator:
     with _suppress_backend_output():
-        front_pipeline = build_paddle_pipeline(
+        return build_paddle_document_coordinator(
             model_manifest=settings.ocr_model_manifest,
             device=settings.ocr_device,
-            side="front",
         )
-        back_pipeline = build_paddle_pipeline(
-            model_manifest=settings.ocr_model_manifest,
-            device=settings.ocr_device,
-            side="back",
-        )
-    return DocumentCoordinator(front_pipeline, back_pipeline)
 
 
 @contextmanager

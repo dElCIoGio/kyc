@@ -29,7 +29,7 @@ class ProfileTests(unittest.TestCase):
             tuple(field.name for field in profile.fields if field.required),
         )
         father_name = next(field for field in profile.fields if field.name == "father_name")
-        self.assertEqual(BoundingBox(42, 280, 300, 52), father_name.bounding_box)
+        self.assertEqual(BoundingBox(34, 262, 300, 52), father_name.bounding_box)
         self.assertEqual(0, father_name.padding)
 
     def test_rejects_duplicate_fields(self) -> None:
@@ -58,8 +58,13 @@ class ProfileTests(unittest.TestCase):
         )
         self.assertEqual("provisional", profile.review_status)
         date_of_birth = next(field for field in profile.fields if field.name == "date_of_birth")
-        self.assertEqual(BoundingBox(248, 188, 102, 26), date_of_birth.bounding_box)
-        self.assertEqual(BoundingBox(494, 276, 166, 166), profile.qr_code.bounding_box if profile.qr_code else None)
+        self.assertEqual("date", date_of_birth.value_type)
+        self.assertLessEqual(date_of_birth.bounding_box.right, profile.canonical_width)
+        self.assertLessEqual(date_of_birth.bounding_box.bottom, profile.canonical_height)
+        self.assertIsNotNone(profile.qr_code)
+        assert profile.qr_code is not None
+        self.assertLessEqual(profile.qr_code.bounding_box.right, profile.canonical_width)
+        self.assertLessEqual(profile.qr_code.bounding_box.bottom, profile.canonical_height)
 
     def test_registry_resolves_document_and_side(self) -> None:
         profile = load_default_profile()

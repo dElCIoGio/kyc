@@ -15,6 +15,7 @@ from kyc_engine.contracts import (
 )
 from kyc_engine.defaults import build_balanced_pipeline
 from kyc_engine.detection import DetectionError
+from kyc_engine.profiles import load_default_profiles
 
 
 class FullImageDetector:
@@ -134,8 +135,11 @@ def synthetic_back_card() -> np.ndarray:
         "05/07/2023 04/07/2033 LUANDA V01"
     )
     qr = cv2.QRCodeEncoder_create().encode(payload)
-    qr = cv2.resize(qr, (166, 166), interpolation=cv2.INTER_NEAREST)
-    image[276:442, 494:660] = cv2.cvtColor(qr, cv2.COLOR_GRAY2BGR)
+    profile = next(profile for profile in load_default_profiles() if profile.side == "back")
+    assert profile.qr_code is not None
+    box = profile.qr_code.bounding_box
+    qr = cv2.resize(qr, (box.width, box.height), interpolation=cv2.INTER_NEAREST)
+    image[box.y:box.bottom, box.x:box.right] = cv2.cvtColor(qr, cv2.COLOR_GRAY2BGR)
     return image
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "angolan-kyc-engine"
-version = "0.1.0"
+version = "0.1.1"
 description = "Offline core engine for extracting structured fields from Angolan ID cards"
 readme = "README.md"
 requires-python = ">=3.12"

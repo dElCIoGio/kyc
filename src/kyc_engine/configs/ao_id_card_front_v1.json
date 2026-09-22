@@ -8,9 +8,9 @@
   "fields": [
     {
       "name": "full_name",
-      "x": 42,
-      "y": 203,
-      "width": 240,
+      "x": 34,
+      "y": 190,
+      "width": 254,
       "height": 48,
       "padding": 2,
       "required": true,
@@ -23,8 +23,8 @@
     },
     {
       "name": "father_name",
-      "x": 42,
-      "y": 280,
+      "x": 34,
+      "y": 262,
       "width": 300,
       "height": 52,
       "padding": 0,
@@ -38,9 +38,9 @@
     },
     {
       "name": "mother_name",
-      "x": 42,
-      "y": 350,
-      "width": 382,
+      "x": 34,
+      "y": 332,
+      "width": 390,
       "height": 55,
       "padding": 2,
       "required": false,
@@ -53,8 +53,8 @@
     },
     {
       "name": "id_number",
-      "x": 42,
-      "y": 435,
+      "x": 34,
+      "y": 412,
       "width": 278,
       "height": 31,
       "padding": 2,

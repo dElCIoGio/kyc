@@ -93,6 +93,24 @@ $env:KYC_OCR_MODEL_MANIFEST = "private-models\paddleocr\ao-id-front-v5-mobile\ma
 uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
+### Docker Compose
+
+The root [`docker-compose.yml`](docker-compose.yml) builds the installable
+engine and API together in one local service. Private OCR artifacts are never
+copied into the image: Compose mounts the ignored `private-models/` directory
+read-only at `/models`.
+
+```powershell
+Copy-Item .env.example .env
+# Set KYC_API_KEY in .env and place verified OCR artifacts under private-models/.
+docker compose up --build
+```
+
+The service is available at `http://127.0.0.1:8000`; use
+`docker compose down` to stop it. The root `.env` is ignored by Git. Its model
+manifest path is suitable for direct local Uvicorn use, while Compose supplies
+the corresponding mounted `/models/...` path to the container.
+
 ## Data Safety
 
 Only synthetic or irreversibly redacted identity-document fixtures may enter Git. Real cards, OCR output, model weights, generated variants, logs containing field values, and private evaluation datasets must stay outside the repository. Serialized results exclude source pixels, crops, paths, EXIF, and stack traces.

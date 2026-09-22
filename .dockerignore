@@ -1,0 +1,42 @@
+# Source-control, local configuration, and editor state
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+
+# Local virtual environments, caches, and build artifacts
+.venv/
+venv/
+env/
+api/venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+**/*.egg-info/
+
+# Sensitive inputs, model artifacts, and generated output remain runtime mounts.
+private-data/
+private-fixtures/
+local-documents/
+private-models/
+models/
+model-cache/
+variants/
+ocr-results/
+reports/
+results.json
+*.log
+
+# Development-only material
+tests/
+api/tests/
+docs/
+app/
+scripts/

@@ -15,7 +15,7 @@ Identity-card photographs and extracted fields are sensitive personal data. The 
 ### Intake
 
 - Restrict supported formats and verify decoded content rather than trusting an extension or MIME claim.
-- Enforce configurable file-size, width, height, total-pixel, and decode-time limits before expensive work.
+- Enforce configurable request-body, file-size, width, height, total-pixel, and decode-time limits before expensive work.
 - Resolve caller paths safely and reject unintended directory traversal at service boundaries.
 - Reject empty, truncated, malformed, unsupported, and decompression-bomb inputs with safe errors.
 - Discard EXIF and unrelated metadata from internal and returned models.
@@ -62,8 +62,12 @@ Diagnostic bundles containing images or OCR values are sensitive artifacts. They
 - Store uploads and results only in the process-local session store; clear image bytes immediately after extraction.
 - Expire and delete complete session state, including results, after the configured TTL.
 - Keep status responses separate from the result endpoint so polling does not repeatedly disclose extracted identity values.
+- Apply a valid-key fixed-window request limit and return a safe `429` response with `Retry-After` when exhausted.
+- Apply a soft job deadline that invalidates the session result and clears retained state; do not release its worker capacity until native OCR exits.
+- Publish only authenticated aggregate metrics: response classes, safe error codes, job outcomes, and latency summaries.
 - Run a single server process until sessions and jobs use a shared external backend.
 - Put TLS, network access controls, and deployment-level request-size/time limits in front of any non-local deployment.
+- Run Uvicorn with `--no-access-log`; application logs must not include request bodies, filenames, paths, OCR output, or extraction results.
 
 ## Dependency and Model Safety
 

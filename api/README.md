@@ -33,6 +33,10 @@ KYC_MAX_UPLOAD_BYTES=15728640
 KYC_SESSION_TTL_SECONDS=1800
 KYC_MAX_SESSIONS=100
 KYC_JOB_WORKERS=1
+KYC_RATE_LIMIT_REQUESTS=120
+KYC_RATE_LIMIT_WINDOW_SECONDS=60
+KYC_JOB_TIMEOUT_SECONDS=30
+KYC_SESSION_CLEANUP_INTERVAL_SECONDS=60
 ```
 
 Start the service from the repository root:
@@ -41,8 +45,29 @@ Start the service from the repository root:
 uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
+## Docker Compose
+
+The repository-root Compose project packages this API and the installed engine
+in one container. It passes root `.env` values into the service and mounts the
+ignored `private-models/` directory read-only at `/models`; the mounted model
+manifest path is supplied automatically to the container.
+
+```powershell
+Copy-Item .env.example .env
+# Configure KYC_API_KEY and place verified artifacts under private-models/.
+docker compose up --build
+```
+
+Use `docker compose down` to stop the service. The service binds container port
+`8000`; set `KYC_API_PORT` in root `.env` to choose a different host port.
+Never place model files, real document images, or API keys in the image build
+context or Git.
+
 The application validates the OCR manifest and initializes both side-specific
 pipelines during startup. Startup fails when configuration or model checks fail.
+`KYC_API_KEY` must be injected by the local environment or deployment secret
+store; never commit it. The complete multipart request body is bounded to the
+configured image limit plus 64 KiB of multipart overhead.
 
 ## Session Workflow
 
@@ -93,6 +118,19 @@ curl.exe -X DELETE http://127.0.0.1:8000/v1/sessions/SESSION_ID `
   -H "X-API-Key: $env:KYC_API_KEY"
 ```
 
+## Monitoring and Limits
+
+`GET /v1/metrics` requires `X-API-Key` and returns only process-lifetime
+aggregate response counts, safe error codes, job outcomes, and latency summaries.
+It never includes session IDs, filenames, image data, OCR values, or extracted
+fields. Metrics reset when the process restarts.
+
+Authenticated `/v1/*` requests are globally limited to 120 requests per
+60-second window by default. A limited request receives `429 RATE_LIMITED` and a
+`Retry-After` header. Jobs have a 30-second soft deadline by default: their
+session is safely failed and cleared on timeout, while an already-running native
+OCR thread is allowed to finish before its worker slot is released.
+
 ## Data Handling
 
 Uploads, session state, and extraction results are memory-only. Image bytes are
@@ -104,6 +142,10 @@ OCR work that has already started.
 The first version is intended for one trusted, single-process deployment. Running
 multiple Uvicorn workers creates independent session stores; use exactly one
 worker until a shared store and external queue are introduced.
+
+Keep Uvicorn access logs disabled with `--no-access-log`. The application does
+not log request bodies, filenames, source paths, image data, OCR output, or
+serialized extraction results.
 
 ## Tests
 

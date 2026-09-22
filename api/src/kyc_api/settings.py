@@ -21,3 +21,11 @@ class ApiSettings(BaseSettings):
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
     max_sessions: int = Field(default=100, gt=0)
     job_workers: int = Field(default=1, gt=0)
+    rate_limit_requests: int = Field(default=120, gt=0)
+    rate_limit_window_seconds: int = Field(default=60, gt=0)
+    job_timeout_seconds: int = Field(default=30, gt=0)
+    session_cleanup_interval_seconds: int = Field(default=60, gt=0)
+
+    @property
+    def max_request_bytes(self) -> int:
+        return self.max_upload_bytes + 64 * 1024

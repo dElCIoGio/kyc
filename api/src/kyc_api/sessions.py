@@ -137,11 +137,15 @@ class SessionStore:
         session_id: str,
         job_id: str,
         result: DocumentExtractionResult,
-    ) -> None:
+    ) -> bool:
         with self._lock:
             record = self._records.get(session_id)
-            if record is None or record.job_id != job_id:
-                return
+            if (
+                record is None
+                or record.job_id != job_id
+                or record.status != SessionStatus.RUNNING
+            ):
+                return False
             record.front = None
             record.back = None
             record.result = result
@@ -152,18 +156,42 @@ class SessionStore:
                 ProcessingStatus.FAILED: SessionStatus.FAILED,
             }[result.status]
             self._refresh_expiry(record)
+            return True
 
-    def fail(self, session_id: str, job_id: str, code: str) -> None:
+    def fail(self, session_id: str, job_id: str, code: str) -> bool:
         with self._lock:
             record = self._records.get(session_id)
-            if record is None or record.job_id != job_id:
-                return
+            if (
+                record is None
+                or record.job_id != job_id
+                or record.status not in {SessionStatus.QUEUED, SessionStatus.RUNNING}
+            ):
+                return False
             record.front = None
             record.back = None
             record.result = None
             record.error_code = code
             record.status = SessionStatus.FAILED
             self._refresh_expiry(record)
+            return True
+
+    def timeout(self, session_id: str, job_id: str) -> bool:
+        """Fail an overdue running job and invalidate any later completion."""
+        with self._lock:
+            record = self._records.get(session_id)
+            if (
+                record is None
+                or record.job_id != job_id
+                or record.status != SessionStatus.RUNNING
+            ):
+                return False
+            record.front = None
+            record.back = None
+            record.result = None
+            record.error_code = "JOB_TIMEOUT"
+            record.status = SessionStatus.FAILED
+            self._refresh_expiry(record)
+            return True
 
     def result(self, session_id: str) -> DocumentExtractionResult:
         with self._lock:
@@ -186,6 +214,11 @@ class SessionStore:
             record = self._records.get(session_id)
             return bool(record and (record.front is not None or record.back is not None))
 
+    def cleanup(self) -> int:
+        """Remove expired terminal sessions without exposing retained state."""
+        with self._lock:
+            return self._purge_expired(_now())
+
     def _get_record(self, session_id: str) -> _SessionRecord:
         self._purge_expired(_now())
         try:
@@ -193,7 +226,7 @@ class SessionStore:
         except KeyError as exc:
             raise SessionNotFound("Session was not found") from exc
 
-    def _purge_expired(self, now: datetime) -> None:
+    def _purge_expired(self, now: datetime) -> int:
         expired = [
             session_id
             for session_id, record in self._records.items()
@@ -203,6 +236,7 @@ class SessionStore:
             record = self._records.pop(session_id)
             record.status = SessionStatus.EXPIRED
             _clear_sensitive_state(record)
+        return len(expired)
 
     def _refresh_expiry(self, record: _SessionRecord) -> None:
         record.expires_at = _now() + self._ttl

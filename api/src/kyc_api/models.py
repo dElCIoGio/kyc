@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict
 
@@ -65,6 +66,28 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "angolan-kyc-api"
     version: str
+
+
+class LatencyMetrics(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    count: int
+    min_ms: float | None
+    max_ms: float | None
+    mean_ms: float | None
+
+
+class MetricsResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    service: str = "angolan-kyc-api"
+    version: str
+    uptime_seconds: float
+    responses_by_status: Mapping[str, int]
+    errors_by_code: Mapping[str, int]
+    jobs_by_outcome: Mapping[str, int]
+    request_latency_ms: LatencyMetrics
+    job_latency_ms: LatencyMetrics
 
 
 class ErrorDetail(BaseModel):

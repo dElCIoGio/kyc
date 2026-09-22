@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    env_file:
+      - .env
+    environment:
+      # The host model directory is mounted at /models in the container.
+      KYC_OCR_MODEL_MANIFEST: /models/paddleocr/ao-id-front-v5-mobile/manifest.json
+    ports:
+      - "${KYC_API_PORT:-8000}:8000"
+    volumes:
+      - ./private-models:/models:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s

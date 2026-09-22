@@ -3,7 +3,11 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
-from kyc_engine import DocumentCoordinator, build_paddle_document_coordinator
+from kyc_engine import (
+    DocumentCoordinator,
+    IntakeLimits,
+    build_paddle_document_coordinator,
+)
 
 from .settings import ApiSettings
 
@@ -13,6 +17,7 @@ def create_coordinator(settings: ApiSettings) -> DocumentCoordinator:
         return build_paddle_document_coordinator(
             model_manifest=settings.ocr_model_manifest,
             device=settings.ocr_device,
+            intake_limits=IntakeLimits(max_encoded_bytes=settings.max_upload_bytes),
         )
 
 

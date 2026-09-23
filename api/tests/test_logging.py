@@ -10,8 +10,11 @@ from fastapi.testclient import TestClient
 
 from kyc_api.logging import JsonFormatter
 from kyc_api.main import create_app
+from kyc_api.jobs import JobManager
+from kyc_api.models import DocumentSide
+from kyc_api.sessions import SessionStore
 
-from helpers import AUTH_HEADERS, PNG_BYTES, settings
+from helpers import AUTH_HEADERS, PNG_BYTES, extraction_result, settings
 
 
 class _SensitiveFailingCoordinator:
@@ -24,7 +27,155 @@ class _FailingPipeline:
         raise RuntimeError("synthetic-private-id-123456789")
 
 
+class _DeepLoggingCoordinator:
+    def process(self, **_kwargs):
+        logging.getLogger("kyc_engine.test_coordinator").info(
+            "deep engine event",
+            extra={"event": "deep_engine_event"},
+        )
+        return extraction_result()
+
+
 class StructuredLoggingTests(unittest.TestCase):
+    def test_responses_get_distinct_server_generated_request_ids(self) -> None:
+        with TestClient(create_app(settings=settings(), coordinator=_DeepLoggingCoordinator())) as client:
+            first = client.get("/healthz", headers={"X-Request-ID": "client-value"})
+            second = client.post("/v1/sessions")
+
+        self.assertIn("X-Request-ID", first.headers)
+        self.assertIn("X-Request-ID", second.headers)
+        self.assertNotEqual("client-value", first.headers["X-Request-ID"])
+        self.assertNotEqual(first.headers["X-Request-ID"], second.headers["X-Request-ID"])
+
+    def test_handled_error_and_log_share_request_context(self) -> None:
+        class ExplodingStore(SessionStore):
+            def create(self):
+                raise RuntimeError("synthetic-private-id-123456789")
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonFormatter(environment="test"))
+        logger = logging.getLogger("kyc_api.main")
+        original_handlers, original_level, original_propagate = (
+            logger.handlers[:], logger.level, logger.propagate
+        )
+        logger.handlers = [handler]
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        try:
+            with TestClient(
+                create_app(
+                    settings=settings(environment="test"),
+                    coordinator=_DeepLoggingCoordinator(),
+                    session_store=ExplodingStore(ttl_seconds=60, max_sessions=2),
+                ),
+                raise_server_exceptions=False,
+            ) as client:
+                first_response = client.post("/v1/sessions", headers=AUTH_HEADERS)
+                second_response = client.post("/v1/sessions", headers=AUTH_HEADERS)
+        finally:
+            logger.handlers = original_handlers
+            logger.setLevel(original_level)
+            logger.propagate = original_propagate
+
+        self.assertEqual(500, first_response.status_code)
+        self.assertEqual(500, second_response.status_code)
+        self.assertIn("X-Request-ID", first_response.headers)
+        self.assertIn("X-Request-ID", second_response.headers)
+        self.assertNotEqual(
+            first_response.headers["X-Request-ID"],
+            second_response.headers["X-Request-ID"],
+        )
+        records = [
+            json.loads(line)
+            for line in stream.getvalue().splitlines()
+            if json.loads(line)["event"] == "http_request_failed"
+        ]
+        self.assertEqual(
+            {first_response.headers["X-Request-ID"], second_response.headers["X-Request-ID"]},
+            {record["request_id"] for record in records},
+        )
+        self.assertNotIn("synthetic-private-id-123456789", stream.getvalue())
+
+    def test_queue_event_has_request_session_and_job_context(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonFormatter(environment="test"))
+        logger = logging.getLogger("kyc_api.main")
+        original_handlers, original_level, original_propagate = (
+            logger.handlers[:], logger.level, logger.propagate
+        )
+        logger.handlers = [handler]
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        try:
+            with TestClient(
+                create_app(settings=settings(environment="test"), coordinator=_DeepLoggingCoordinator())
+            ) as client:
+                session_id = client.post("/v1/sessions", headers=AUTH_HEADERS).json()["session_id"]
+                client.post(
+                    f"/v1/sessions/{session_id}/images/front",
+                    headers=AUTH_HEADERS,
+                    files={"image": ("front.png", PNG_BYTES, "image/png")},
+                )
+                response = client.post(f"/v1/sessions/{session_id}/process", headers=AUTH_HEADERS)
+        finally:
+            logger.handlers = original_handlers
+            logger.setLevel(original_level)
+            logger.propagate = original_propagate
+
+        record = next(
+            json.loads(line)
+            for line in stream.getvalue().splitlines()
+            if json.loads(line)["event"] == "processing_job_queued"
+        )
+        self.assertEqual(response.headers["X-Request-ID"], record["request_id"])
+        self.assertEqual(session_id, record["session_id"])
+        self.assertEqual(response.json()["job_id"], record["job_id"])
+
+    def test_worker_context_reaches_engine_and_does_not_leak_between_jobs(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonFormatter(environment="test"))
+        logger = logging.getLogger("kyc_engine")
+        original_handlers, original_level, original_propagate = (
+            logger.handlers[:], logger.level, logger.propagate
+        )
+        logger.handlers = [handler]
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        store = SessionStore(ttl_seconds=60, max_sessions=2)
+        first = store.create().session_id
+        second = store.create().session_id
+        store.upload(first, DocumentSide.FRONT, PNG_BYTES)
+        store.upload(second, DocumentSide.FRONT, PNG_BYTES)
+        try:
+            manager = JobManager(
+                _DeepLoggingCoordinator(),
+                store,
+                workers=1,
+                capacity=2,
+            )
+            first_job = manager.submit(first).job_id
+            second_job = manager.submit(second).job_id
+            self._wait_for_success(store, first)
+            self._wait_for_success(store, second)
+            manager.shutdown()
+        finally:
+            logger.handlers = original_handlers
+            logger.setLevel(original_level)
+            logger.propagate = original_propagate
+
+        records = [
+            json.loads(line)
+            for line in stream.getvalue().splitlines()
+            if json.loads(line)["event"] == "deep_engine_event"
+        ]
+        self.assertEqual(2, len(records))
+        self.assertEqual({(first, first_job), (second, second_job)}, {
+            (record["session_id"], record["job_id"]) for record in records
+        })
+        self.assertTrue(all("request_id" not in record for record in records))
     def test_formatter_emits_valid_json_and_ignores_unapproved_values(self) -> None:
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
@@ -147,6 +298,14 @@ class StructuredLoggingTests(unittest.TestCase):
                 return
             time.sleep(0.01)
         self.fail("job did not fail")
+
+    def _wait_for_success(self, store: SessionStore, session_id: str) -> None:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if store.get(session_id).status.value == "success":
+                return
+            time.sleep(0.01)
+        self.fail("job did not complete")
 
 
 if __name__ == "__main__":

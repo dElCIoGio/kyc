@@ -4,16 +4,68 @@ import json
 import logging
 import sys
 import traceback
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 
 _SAFE_FIELDS = (
-    "session_id", "job_id", "side", "sides", "stage", "status", "duration_ms",
+    "request_id", "session_id", "job_id", "side", "sides", "stage", "status", "duration_ms",
     "error_code", "exception_type", "field",
 )
 _HANDLER_MARKER = "_kyc_json_handler"
+
+
+@dataclass(frozen=True)
+class LoggingContext:
+    request_id: str | None = None
+    session_id: str | None = None
+    job_id: str | None = None
+
+
+_logging_context: ContextVar[LoggingContext] = ContextVar(
+    "kyc_logging_context",
+    default=LoggingContext(),
+)
+
+
+def get_logging_context() -> LoggingContext:
+    return _logging_context.get()
+
+
+@contextmanager
+def logging_context(
+    *,
+    request_id: str | None = None,
+    session_id: str | None = None,
+    job_id: str | None = None,
+):
+    """Add safe correlation identifiers for one synchronous or async scope."""
+    current = get_logging_context()
+    token = _logging_context.set(
+        LoggingContext(
+            request_id=request_id if request_id is not None else current.request_id,
+            session_id=session_id if session_id is not None else current.session_id,
+            job_id=job_id if job_id is not None else current.job_id,
+        )
+    )
+    try:
+        yield
+    finally:
+        _logging_context.reset(token)
+
+
+@contextmanager
+def job_logging_context(*, session_id: str, job_id: str):
+    """Bind only durable job context, excluding any request context."""
+    token = _logging_context.set(LoggingContext(session_id=session_id, job_id=job_id))
+    try:
+        yield
+    finally:
+        _logging_context.reset(token)
 
 
 class JsonFormatter(logging.Formatter):
@@ -24,6 +76,7 @@ class JsonFormatter(logging.Formatter):
         self._environment = environment
 
     def format(self, record: logging.LogRecord) -> str:
+        context = get_logging_context()
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds"),
             "level": record.levelname,
@@ -32,7 +85,13 @@ class JsonFormatter(logging.Formatter):
             "environment": self._environment,
             "event": getattr(record, "event", "log"),
         }
+        for name in ("request_id", "session_id", "job_id"):
+            value = getattr(context, name) or getattr(record, name, None)
+            if value is not None:
+                payload[name] = value
         for name in _SAFE_FIELDS:
+            if name in {"request_id", "session_id", "job_id"}:
+                continue
             value = getattr(record, name, None)
             if value is not None:
                 payload[name] = value

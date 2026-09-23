@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from concurrent.futures import Executor
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
@@ -17,9 +17,9 @@ from . import __version__
 from .auth import require_api_key
 from .composition import create_coordinator
 from .jobs import JobCapacityExceeded, JobManager
-from .logging import configure_logging
+from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
-from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware
+from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware, RequestContextMiddleware
 from .models import (
     DeleteResponse,
     DocumentSide,
@@ -136,6 +136,7 @@ def create_app(
         limit_provider=lambda: application.state.settings.max_request_bytes,
         metrics_provider=lambda: application.state.metrics,
     )
+    application.add_middleware(RequestContextMiddleware)
     _install_error_handlers(application)
 
     @application.get("/healthz", response_model=HealthResponse)
@@ -179,26 +180,27 @@ def create_app(
         request: Request,
         image: UploadFile = File(...),
     ) -> UploadResponse:
-        _validate_upload_metadata(image)
-        limit = request.app.state.settings.max_upload_bytes
-        try:
-            content = await image.read(limit + 1)
-        finally:
-            await image.close()
-        if len(content) > limit:
-            raise _problem(413, "UPLOAD_TOO_LARGE", "Uploaded image exceeds the size limit")
-        if not content or not _has_supported_signature(content, image.content_type):
-            raise _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
+        with _session_logging_context(request, session_id):
+            _validate_upload_metadata(image)
+            limit = request.app.state.settings.max_upload_bytes
+            try:
+                content = await image.read(limit + 1)
+            finally:
+                await image.close()
+            if len(content) > limit:
+                raise _problem(413, "UPLOAD_TOO_LARGE", "Uploaded image exceeds the size limit")
+            if not content or not _has_supported_signature(content, image.content_type):
+                raise _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
 
-        snapshot = request.app.state.sessions.upload(session_id, side, content)
-        return UploadResponse(
-            session_id=snapshot.session_id,
-            status=snapshot.status,
-            side=side,
-            size_bytes=len(content),
-            uploaded_sides=snapshot.uploaded_sides,
-            expires_at=snapshot.expires_at,
-        )
+            snapshot = request.app.state.sessions.upload(session_id, side, content)
+            return UploadResponse(
+                session_id=snapshot.session_id,
+                status=snapshot.status,
+                side=side,
+                size_bytes=len(content),
+                uploaded_sides=snapshot.uploaded_sides,
+                expires_at=snapshot.expires_at,
+            )
 
     @application.post(
         "/v1/sessions/{session_id}/process",
@@ -213,13 +215,16 @@ def create_app(
         },
     )
     def process_session(session_id: str, request: Request) -> JobStatusResponse:
-        snapshot = request.app.state.jobs.submit(session_id)
-        assert snapshot.job_id is not None
-        return JobStatusResponse(
-            session_id=snapshot.session_id,
-            job_id=snapshot.job_id,
-            status=snapshot.status,
-        )
+        with _session_logging_context(request, session_id):
+            snapshot = request.app.state.jobs.submit(session_id)
+            assert snapshot.job_id is not None
+            with logging_context(job_id=snapshot.job_id):
+                logger.info("processing job queued", extra={"event": "processing_job_queued"})
+            return JobStatusResponse(
+                session_id=snapshot.session_id,
+                job_id=snapshot.job_id,
+                status=snapshot.status,
+            )
 
     @application.get(
         "/v1/sessions/{session_id}",
@@ -228,7 +233,8 @@ def create_app(
         responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
     )
     def get_session(session_id: str, request: Request) -> SessionResponse:
-        return _session_response(request.app.state.sessions.get(session_id))
+        with _session_logging_context(request, session_id):
+            return _session_response(request.app.state.sessions.get(session_id))
 
     @application.get(
         "/v1/sessions/{session_id}/result",
@@ -241,8 +247,9 @@ def create_app(
         },
     )
     def get_result(session_id: str, request: Request) -> JSONResponse:
-        result = request.app.state.sessions.result(session_id)
-        return JSONResponse(content=result.to_dict())
+        with _session_logging_context(request, session_id):
+            result = request.app.state.sessions.result(session_id)
+            return JSONResponse(content=result.to_dict())
 
     @application.delete(
         "/v1/sessions/{session_id}",
@@ -251,8 +258,9 @@ def create_app(
         responses={401: {"model": ErrorResponse}},
     )
     def delete_session(session_id: str, request: Request) -> DeleteResponse:
-        request.app.state.sessions.delete(session_id)
-        return DeleteResponse()
+        with _session_logging_context(request, session_id):
+            request.app.state.sessions.delete(session_id)
+            return DeleteResponse()
 
     return application
 
@@ -301,60 +309,106 @@ def _install_error_handlers(application: FastAPI) -> None:
         code = str(detail.get("code", "HTTP_ERROR"))
         message = str(detail.get("message", "The request could not be completed"))
         _record_error(request, code)
-        return _error_response(exc.status_code, code, message, headers=exc.headers)
+        return _error_response(
+            exc.status_code,
+            code,
+            message,
+            headers=exc.headers,
+            request_id=_request_id(request),
+        )
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(
         request: Request, _exc: RequestValidationError
     ) -> JSONResponse:
         _record_error(request, "INVALID_REQUEST")
-        return _error_response(422, "INVALID_REQUEST", "The request is invalid")
+        return _error_response(
+            422, "INVALID_REQUEST", "The request is invalid", request_id=_request_id(request)
+        )
 
     @application.exception_handler(SessionNotFound)
     async def session_not_found(request: Request, _exc: SessionNotFound) -> JSONResponse:
         _record_error(request, "SESSION_NOT_FOUND")
-        return _error_response(404, "SESSION_NOT_FOUND", "Session was not found")
+        return _error_response(
+            404, "SESSION_NOT_FOUND", "Session was not found", request_id=_request_id(request)
+        )
 
     @application.exception_handler(SessionConflict)
     async def session_conflict(request: Request, exc: SessionConflict) -> JSONResponse:
         _record_error(request, exc.code)
-        return _error_response(409, exc.code, str(exc))
+        return _error_response(409, exc.code, str(exc), request_id=_request_id(request))
 
     @application.exception_handler(SessionCapacityExceeded)
     async def session_capacity(
         request: Request, _exc: SessionCapacityExceeded
     ) -> JSONResponse:
         _record_error(request, "SESSION_CAPACITY_EXCEEDED")
-        return _error_response(429, "SESSION_CAPACITY_EXCEEDED", "Session capacity has been reached")
+        return _error_response(
+            429,
+            "SESSION_CAPACITY_EXCEEDED",
+            "Session capacity has been reached",
+            request_id=_request_id(request),
+        )
 
     @application.exception_handler(JobCapacityExceeded)
     async def job_capacity(request: Request, _exc: JobCapacityExceeded) -> JSONResponse:
         _record_error(request, "JOB_CAPACITY_EXCEEDED")
-        return _error_response(429, "JOB_CAPACITY_EXCEEDED", "Job capacity has been reached")
+        return _error_response(
+            429,
+            "JOB_CAPACITY_EXCEEDED",
+            "Job capacity has been reached",
+            request_id=_request_id(request),
+        )
 
     @application.exception_handler(SessionStoreError)
     async def session_error(request: Request, _exc: SessionStoreError) -> JSONResponse:
         _record_error(request, "JOB_FAILED")
-        return _error_response(500, "JOB_FAILED", "Document extraction failed")
+        return _error_response(
+            500, "JOB_FAILED", "Document extraction failed", request_id=_request_id(request)
+        )
 
     @application.exception_handler(Exception)
     async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         _record_error(request, "INTERNAL_ERROR")
-        logger.exception(
-            "unexpected HTTP request failure",
-            extra={
-                "event": "http_request_failed",
-                "error_code": "INTERNAL_ERROR",
-                "exception_type": type(exc).__name__,
-            },
+        with logging_context(
+            request_id=_request_id(request),
+            session_id=_session_id(request),
+        ):
+            logger.exception(
+                "unexpected HTTP request failure",
+                extra={
+                    "event": "http_request_failed",
+                    "error_code": "INTERNAL_ERROR",
+                    "exception_type": type(exc).__name__,
+                },
+            )
+        return _error_response(
+            500,
+            "INTERNAL_ERROR",
+            "The request could not be completed",
+            request_id=_request_id(request),
         )
-        return _error_response(500, "INTERNAL_ERROR", "The request could not be completed")
 
 
 def _record_error(request: Request, code: str) -> None:
     metrics = getattr(request.app.state, "metrics", None)
     if metrics is not None:
         metrics.record_error(code)
+
+
+def _request_id(request: Request) -> str | None:
+    return getattr(request.state, "request_id", None)
+
+
+def _session_id(request: Request) -> str | None:
+    return getattr(request.state, "session_id", None)
+
+
+@contextmanager
+def _session_logging_context(request: Request, session_id: str):
+    request.state.session_id = session_id
+    with logging_context(session_id=session_id):
+        yield
 
 
 async def _cleanup_sessions(
@@ -375,11 +429,15 @@ def _error_response(
     message: str,
     *,
     headers: dict[str, str] | None = None,
+    request_id: str | None = None,
 ) -> JSONResponse:
+    response_headers = dict(headers or {})
+    if request_id is not None:
+        response_headers["X-Request-ID"] = request_id
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message}},
-        headers=headers,
+        headers=response_headers or None,
     )
 
 

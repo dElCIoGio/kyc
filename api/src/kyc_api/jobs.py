@@ -9,6 +9,7 @@ from typing import Callable
 from kyc_engine import DocumentCoordinator
 
 from .metrics import MetricsRegistry
+from .logging import job_logging_context
 from .sessions import SessionSnapshot, SessionStore, SessionStoreError
 
 
@@ -81,6 +82,10 @@ class JobManager:
             self._executor.shutdown(wait=True, cancel_futures=False)
 
     def _run(self, session_id: str, job_id: str) -> None:
+        with job_logging_context(session_id=session_id, job_id=job_id):
+            self._run_with_context(session_id, job_id)
+
+    def _run_with_context(self, session_id: str, job_id: str) -> None:
         started = perf_counter()
         timeout_timer: Timer | None = None
         try:
@@ -89,8 +94,6 @@ class JobManager:
                 "processing job started",
                 extra={
                     "event": "processing_job_started",
-                    "session_id": session_id,
-                    "job_id": job_id,
                     "sides": [
                         side
                         for side, source in (("front", front), ("back", back))
@@ -115,8 +118,6 @@ class JobManager:
                     "processing job completed",
                     extra={
                         "event": "processing_job_completed",
-                        "session_id": session_id,
-                        "job_id": job_id,
                         "status": result.status.value,
                         "duration_ms": round(duration_ms, 3),
                     },
@@ -127,8 +128,6 @@ class JobManager:
                 "processing job failed",
                 extra={
                     "event": "processing_job_failed",
-                    "session_id": session_id,
-                    "job_id": job_id,
                     "error_code": "PROCESSING_FAILED",
                     "duration_ms": round(duration_ms, 3),
                     "exception_type": type(exc).__name__,
@@ -142,16 +141,15 @@ class JobManager:
             self._slots.release()
 
     def _handle_timeout(self, session_id: str, job_id: str) -> None:
-        if self._store.timeout(session_id, job_id):
-            self._metrics.record_error("JOB_TIMEOUT")
-            self._metrics.record_job("timeout", self._timeout_seconds * 1000.0)
-            logger.warning(
-                "processing job timed out",
-                extra={
-                    "event": "processing_job_timed_out",
-                    "session_id": session_id,
-                    "job_id": job_id,
-                    "error_code": "JOB_TIMEOUT",
-                    "duration_ms": self._timeout_seconds * 1000.0,
-                },
-            )
+        with job_logging_context(session_id=session_id, job_id=job_id):
+            if self._store.timeout(session_id, job_id):
+                self._metrics.record_error("JOB_TIMEOUT")
+                self._metrics.record_job("timeout", self._timeout_seconds * 1000.0)
+                logger.warning(
+                    "processing job timed out",
+                    extra={
+                        "event": "processing_job_timed_out",
+                        "error_code": "JOB_TIMEOUT",
+                        "duration_ms": self._timeout_seconds * 1000.0,
+                    },
+                )

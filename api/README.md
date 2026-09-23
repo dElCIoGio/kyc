@@ -81,6 +81,13 @@ Docker and Railway collection. Every record includes a timestamp, level, logger,
 service, environment, and event; job lifecycle events may also include existing
 opaque session/job IDs, sides, status, and duration.
 
+Every HTTP response includes a server-generated `X-Request-ID`; client-provided
+values are ignored. `request_id` identifies one HTTP request, `session_id` is
+the existing in-memory KYC session, and `job_id` is one extraction job. Background
+work correlates using `session_id` and `job_id`, not the original request ID, so
+operators can search a failed extraction's logs by job ID. These opaque IDs carry
+no KYC data.
+
 Set `KYC_LOG_LEVEL` to a standard Python logging level (for example `DEBUG` or
 `WARNING`) and `KYC_ENVIRONMENT` to the deployment name. Logs never include
 request bodies, filenames, image bytes, OCR text, extracted values, QR payloads,

@@ -1,15 +1,48 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 from time import perf_counter
 from typing import Awaitable, Callable
 
 from .metrics import MetricsRegistry
+from .logging import logging_context
 
 
 Receive = Callable[[], Awaitable[dict[str, object]]]
 Send = Callable[[dict[str, object]], Awaitable[None]]
 AsgiApp = Callable[[dict[str, object], Receive, Send], Awaitable[None]]
+
+
+class RequestContextMiddleware:
+    """Bind a server-generated request identifier for the complete HTTP request."""
+
+    def __init__(self, app: AsgiApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, object], receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = uuid4().hex
+        state = scope.setdefault("state", {})
+        if isinstance(state, dict):
+            state["request_id"] = request_id
+
+        async def add_request_id(message: dict[str, object]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = [
+                    (bytes(key), bytes(value))
+                    for key, value in message.get("headers", [])  # type: ignore[arg-type]
+                    if bytes(key).lower() != b"x-request-id"
+                ]
+                headers.append((b"x-request-id", request_id.encode("ascii")))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        with logging_context(request_id=request_id):
+            await self.app(scope, receive, add_request_id)
 
 
 class RequestBodyLimitMiddleware:

@@ -88,6 +88,12 @@ work correlates using `session_id` and `job_id`, not the original request ID, so
 operators can search a failed extraction's logs by job ID. These opaque IDs carry
 no KYC data.
 
+Each pipeline side emits `pipeline_stage_started`, `pipeline_stage_completed`,
+or `pipeline_stage_failed` for `intake`, `detection`, `profile`,
+`normalization`, `variants`, `quality`, `qr` (when configured),
+`field_localization`, `ocr`, and `reconciliation`. Filter by `job_id`, then read
+the ordered events and `duration_ms` values to identify the slow or failed stage.
+
 Set `KYC_LOG_LEVEL` to a standard Python logging level (for example `DEBUG` or
 `WARNING`) and `KYC_ENVIRONMENT` to the deployment name. Logs never include
 request bodies, filenames, image bytes, OCR text, extracted values, QR payloads,

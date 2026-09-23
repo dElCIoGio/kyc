@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from time import perf_counter
 from typing import Callable
 from uuid import uuid4
@@ -17,6 +16,7 @@ from .contracts import (
 from .detection import DetectionError, DocumentDetector
 from .fields import FieldLocalizationError, FieldLocalizer
 from .intake import ImageIntake, IntakeError
+from .instrumentation import observe_pipeline_stage
 from .normalization import DocumentNormalizer, NormalizationError
 from .ocr import TextRecognizer
 from .profiles import ProfileRegistry
@@ -24,9 +24,6 @@ from .quality import QualityAssessmentPipeline, StructuralQualityGate
 from .qr import QrCodeExtractor
 from .reconciliation import CandidateReconciler
 from .variants import BalancedVariantPolicy
-
-
-logger = logging.getLogger(__name__)
 
 
 class KycPipeline:
@@ -63,25 +60,30 @@ class KycPipeline:
         issues: list[PipelineIssue] = []
 
         try:
-            input_image = _timed(
-                "intake",
-                timings,
-                lambda: self.intake.load(source, processing_id=processing_id),
-            )
+            with observe_pipeline_stage("intake"):
+                input_image = _timed(
+                    "intake",
+                    timings,
+                    lambda: self.intake.load(source, processing_id=processing_id),
+                )
         except IntakeError as exc:
             return _failed(processing_id, "intake", exc.code, str(exc), timings)
 
         try:
-            detection = _timed(
-                "detection",
-                timings,
-                lambda: self.detector.detect(input_image.image),
-            )
+            with observe_pipeline_stage("detection"):
+                detection = _timed(
+                    "detection",
+                    timings,
+                    lambda: self.detector.detect(input_image.image),
+                )
         except DetectionError as exc:
             return _failed(processing_id, "detection", exc.code, str(exc), timings)
 
         try:
-            profile = self.profiles.resolve(detection.document_type, detection.side)
+            with observe_pipeline_stage(
+                "profile", error_code="UNSUPPORTED_DOCUMENT_PROFILE"
+            ):
+                profile = self.profiles.resolve(detection.document_type, detection.side)
         except KeyError:
             return _failed(
                 processing_id,
@@ -103,11 +105,12 @@ class KycPipeline:
             )
 
         try:
-            normalized = _timed(
-                "normalization",
-                timings,
-                lambda: self.normalizer.normalize(input_image.image, detection, profile),
-            )
+            with observe_pipeline_stage("normalization"):
+                normalized = _timed(
+                    "normalization",
+                    timings,
+                    lambda: self.normalizer.normalize(input_image.image, detection, profile),
+                )
         except NormalizationError as exc:
             return _failed(
                 processing_id,
@@ -120,21 +123,35 @@ class KycPipeline:
             )
 
         try:
-            batches = _timed(
+            with observe_pipeline_stage(
+                "variants", error_code="VARIANT_PROCESSING_FAILED"
+            ):
+                batches = _timed(
+                    "variants",
+                    timings,
+                    lambda: self.variants.generate(normalized.image),
+                )
+        except (ValueError, RuntimeError):
+            return _failed(
+                processing_id,
                 "variants",
+                "VARIANT_PROCESSING_FAILED",
+                "Image variants could not be generated safely",
                 timings,
-                lambda: self.variants.generate(normalized.image),
+                detection=detection,
+                profile_id=profile.profile_id,
             )
-            assessments = _timed(
-                "quality",
-                timings,
-                lambda: self.quality.assess(batches),
-            )
-            usable_batches = self.quality_gate.select(batches, assessments)
-        except (ValueError, RuntimeError) as exc:
-            _log_processing_exception(
-                exc, stage="variants", error_code="VARIANT_PROCESSING_FAILED"
-            )
+        try:
+            with observe_pipeline_stage(
+                "quality", error_code="VARIANT_PROCESSING_FAILED"
+            ):
+                assessments = _timed(
+                    "quality",
+                    timings,
+                    lambda: self.quality.assess(batches),
+                )
+                usable_batches = self.quality_gate.select(batches, assessments)
+        except (ValueError, RuntimeError):
             return _failed(
                 processing_id,
                 "variants",
@@ -158,15 +175,13 @@ class KycPipeline:
         qr_code: QrCodeResult | None = None
         if profile.qr_code is not None:
             try:
-                qr_code = _timed(
-                    "qr",
-                    timings,
-                    lambda: self.qr_extractor.extract(usable_batches, profile.qr_code),
-                )
-            except Exception as exc:
-                _log_processing_exception(
-                    exc, stage="qr", error_code="QR_PROCESSING_FAILED"
-                )
+                with observe_pipeline_stage("qr", error_code="QR_PROCESSING_FAILED"):
+                    qr_code = _timed(
+                        "qr",
+                        timings,
+                        lambda: self.qr_extractor.extract(usable_batches, profile.qr_code),
+                    )
+            except Exception:
                 issues.append(
                     PipelineIssue(
                         stage="qr",
@@ -187,11 +202,14 @@ class KycPipeline:
                     )
 
         try:
-            crops = _timed(
-                "field_localization",
-                timings,
-                lambda: self.localizer.localize(usable_batches, profile),
-            )
+            with observe_pipeline_stage(
+                "field_localization", error_code="FIELD_LOCALIZATION_FAILED"
+            ):
+                crops = _timed(
+                    "field_localization",
+                    timings,
+                    lambda: self.localizer.localize(usable_batches, profile),
+                )
         except FieldLocalizationError:
             return _failed(
                 processing_id,
@@ -204,13 +222,15 @@ class KycPipeline:
             )
 
         try:
-            candidates = _timed(
-                "ocr",
-                timings,
-                lambda: self.recognizer.recognize_batch(crops),
-            )
-        except Exception as exc:
-            _log_processing_exception(exc, stage="ocr", error_code="OCR_ENGINE_FAILED")
+            with observe_pipeline_stage("ocr", error_code="OCR_ENGINE_FAILED"):
+                candidates = _timed(
+                    "ocr",
+                    timings,
+                    lambda: self.recognizer.recognize_batch(crops),
+                )
+                if len(candidates) != len(crops):
+                    raise RuntimeError("TextRecognizer must return one candidate per field crop")
+        except Exception:
             return _failed(
                 processing_id,
                 "ocr",
@@ -220,14 +240,12 @@ class KycPipeline:
                 detection=detection,
                 profile_id=profile.profile_id,
             )
-        if len(candidates) != len(crops):
-            raise RuntimeError("TextRecognizer must return one candidate per field crop")
-
-        reconciled = _timed(
-            "reconciliation",
-            timings,
-            lambda: self.reconciler.reconcile(profile, candidates),
-        )
+        with observe_pipeline_stage("reconciliation"):
+            reconciled = _timed(
+                "reconciliation",
+                timings,
+                lambda: self.reconciler.reconcile(profile, candidates),
+            )
         issues.extend(reconciled.issues)
         status = (
             ProcessingStatus.PARTIAL
@@ -285,18 +303,6 @@ def _failed(
             ),
         ),
         timings_ms=timings,
-    )
-
-
-def _log_processing_exception(exc: Exception, *, stage: str, error_code: str) -> None:
-    logger.exception(
-        "pipeline processing failed",
-        extra={
-            "event": "pipeline_processing_failed",
-            "stage": stage,
-            "error_code": error_code,
-            "exception_type": type(exc).__name__,
-        },
     )
 
 

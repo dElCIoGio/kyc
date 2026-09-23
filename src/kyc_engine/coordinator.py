@@ -14,6 +14,7 @@ from .contracts import (
     immutable_mapping,
 )
 from .pipeline import KycPipeline
+from .instrumentation import pipeline_side_context
 
 
 logger = logging.getLogger(__name__)
@@ -118,9 +119,10 @@ class DocumentCoordinator:
     ) -> KycExtractionResult | None:
         started = perf_counter()
         try:
-            return (
-                self.front_pipeline if side == "front" else self.back_pipeline
-            ).process(source)
+            with pipeline_side_context(side):
+                return (
+                    self.front_pipeline if side == "front" else self.back_pipeline
+                ).process(source)
         except Exception as exc:
             logger.exception(
                 "document side processing failed",

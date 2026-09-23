@@ -13,6 +13,7 @@ from kyc_api.main import create_app
 from kyc_api.jobs import JobManager
 from kyc_api.models import DocumentSide
 from kyc_api.sessions import SessionStore
+from kyc_engine.instrumentation import observe_pipeline_stage
 
 from helpers import AUTH_HEADERS, PNG_BYTES, extraction_result, settings
 
@@ -29,10 +30,8 @@ class _FailingPipeline:
 
 class _DeepLoggingCoordinator:
     def process(self, **_kwargs):
-        logging.getLogger("kyc_engine.test_coordinator").info(
-            "deep engine event",
-            extra={"event": "deep_engine_event"},
-        )
+        with observe_pipeline_stage("test_stage"):
+            pass
         return extraction_result()
 
 
@@ -169,7 +168,7 @@ class StructuredLoggingTests(unittest.TestCase):
         records = [
             json.loads(line)
             for line in stream.getvalue().splitlines()
-            if json.loads(line)["event"] == "deep_engine_event"
+            if json.loads(line)["event"] == "pipeline_stage_completed"
         ]
         self.assertEqual(2, len(records))
         self.assertEqual({(first, first_job), (second, second_job)}, {
@@ -210,6 +209,32 @@ class StructuredLoggingTests(unittest.TestCase):
         self.assertEqual("test", payload["environment"])
         self.assertEqual("session-test-1", payload["session_id"])
         self.assertNotIn("extracted_value", payload)
+        self.assertNotIn("synthetic-private-id-123456789", stream.getvalue())
+
+    def test_stage_failure_json_omits_exception_message(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonFormatter(environment="test"))
+        logger = logging.getLogger("kyc_engine.pipeline")
+        original_handlers, original_level, original_propagate = (
+            logger.handlers[:], logger.level, logger.propagate
+        )
+        logger.handlers = [handler]
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        try:
+            with self.assertRaises(RuntimeError):
+                with observe_pipeline_stage("ocr", error_code="OCR_ENGINE_FAILED"):
+                    raise RuntimeError("synthetic-private-id-123456789")
+        finally:
+            logger.handlers = original_handlers
+            logger.setLevel(original_level)
+            logger.propagate = original_propagate
+
+        records = [json.loads(line) for line in stream.getvalue().splitlines()]
+        self.assertEqual("pipeline_stage_started", records[0]["event"])
+        self.assertEqual("pipeline_stage_failed", records[1]["event"])
+        self.assertEqual("OCR_ENGINE_FAILED", records[1]["error_code"])
         self.assertNotIn("synthetic-private-id-123456789", stream.getvalue())
 
     def test_failed_background_job_logs_traceback_but_keeps_public_error_generic(self) -> None:

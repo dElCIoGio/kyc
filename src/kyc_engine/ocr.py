@@ -288,13 +288,14 @@ class PaddleOCRTextRecognizer:
         try:
             parsed = self._predict_and_combine(indexed_crops, predict, combine)
         except Exception as exc:
-            logger.exception(
+            logger.warning(
                 "OCR batch prediction failed; retrying fields individually",
                 extra={
                     "event": "ocr_batch_prediction_failed",
                     "stage": "ocr",
                     "exception_type": type(exc).__name__,
                 },
+                exc_info=True,
             )
             for index, crop in indexed_crops:
                 try:

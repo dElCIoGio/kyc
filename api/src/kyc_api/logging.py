@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from opentelemetry import trace
+
 
 _SAFE_FIELDS = (
     "request_id", "session_id", "job_id", "side", "sides", "stage", "status", "duration_ms",
@@ -95,6 +97,11 @@ class JsonFormatter(logging.Formatter):
             value = getattr(record, name, None)
             if value is not None:
                 payload[name] = value
+        span = trace.get_current_span()
+        span_context = span.get_span_context()
+        if span.is_recording() and span_context.is_valid:
+            payload["trace_id"] = trace.format_trace_id(span_context.trace_id)
+            payload["span_id"] = trace.format_span_id(span_context.span_id)
         if record.exc_info is not None:
             exception_type, _exception, traceback_value = record.exc_info
             if exception_type is not None:

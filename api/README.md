@@ -94,6 +94,16 @@ or `pipeline_stage_failed` for `intake`, `detection`, `profile`,
 `field_localization`, `ocr`, and `reconciliation`. Filter by `job_id`, then read
 the ordered events and `duration_ms` values to identify the slow or failed stage.
 
+Each background extraction is also one OpenTelemetry trace: `kyc.process_job`
+contains supplied `kyc.process_side` spans, which contain the same semantic
+`kyc.stage` boundaries listed above. Active structured logs include the matching
+lowercase hexadecimal `trace_id` and `span_id`, so operators can move between a
+job-ID log search and a trace view. Trace attributes contain only job/session
+IDs, side, stage, processing status, and safe exception types; they never carry
+KYC values. The engine remains usable without an SDK provider or exporter. This
+release configures no external tracing backend; exporter and deployment setup is
+intentionally deferred.
+
 Set `KYC_LOG_LEVEL` to a standard Python logging level (for example `DEBUG` or
 `WARNING`) and `KYC_ENVIRONMENT` to the deployment name. Logs never include
 request bodies, filenames, image bytes, OCR text, extracted values, QR payloads,

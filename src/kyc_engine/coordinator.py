@@ -14,7 +14,7 @@ from .contracts import (
     immutable_mapping,
 )
 from .pipeline import KycPipeline
-from .instrumentation import pipeline_side_context
+from .instrumentation import mark_span_failed, observe_pipeline_side
 
 
 logger = logging.getLogger(__name__)
@@ -119,30 +119,36 @@ class DocumentCoordinator:
     ) -> KycExtractionResult | None:
         started = perf_counter()
         try:
-            with pipeline_side_context(side):
-                return (
-                    self.front_pipeline if side == "front" else self.back_pipeline
-                ).process(source)
-        except Exception as exc:
-            logger.exception(
-                "document side processing failed",
-                extra={
-                    "event": "document_side_processing_failed",
-                    "side": side,
-                    "stage": "coordinator",
-                    "error_code": f"{side.upper()}_PROCESSING_FAILED",
-                    "exception_type": type(exc).__name__,
-                },
-            )
-            issues.append(
-                PipelineIssue(
-                    stage="coordinator",
-                    code=f"{side.upper()}_PROCESSING_FAILED",
-                    severity=IssueSeverity.ERROR,
-                    message=f"The {side} side could not be processed",
-                )
-            )
-            return None
+            with observe_pipeline_side(side) as span:
+                try:
+                    result = (
+                        self.front_pipeline if side == "front" else self.back_pipeline
+                    ).process(source)
+                except Exception as exc:
+                    mark_span_failed(span, exc)
+                    span.set_attribute("kyc.processing_status", "failed")
+                    logger.exception(
+                        "document side processing failed",
+                        extra={
+                            "event": "document_side_processing_failed",
+                            "side": side,
+                            "stage": "coordinator",
+                            "error_code": f"{side.upper()}_PROCESSING_FAILED",
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    issues.append(
+                        PipelineIssue(
+                            stage="coordinator",
+                            code=f"{side.upper()}_PROCESSING_FAILED",
+                            severity=IssueSeverity.ERROR,
+                            message=f"The {side} side could not be processed",
+                        )
+                    )
+                    return None
+                if result is not None:
+                    span.set_attribute("kyc.processing_status", result.status.value)
+                return result
         finally:
             timings[f"{side}_total"] = round((perf_counter() - started) * 1000.0, 3)
 

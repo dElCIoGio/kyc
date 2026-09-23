@@ -20,6 +20,7 @@ from .jobs import JobCapacityExceeded, JobManager
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
 from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware, RequestContextMiddleware
+from .telemetry import configure_tracing, flush_tracing
 from .models import (
     DeleteResponse,
     DocumentSide,
@@ -64,6 +65,10 @@ def create_app(
             environment=resolved_settings.environment,
         )
         try:
+            configure_tracing(
+                environment=resolved_settings.environment,
+                service_version=__version__,
+            )
             resolved_store = session_store or SessionStore(
                 ttl_seconds=resolved_settings.session_ttl_seconds,
                 max_sessions=resolved_settings.max_sessions,
@@ -119,6 +124,7 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await cleanup_task
             manager.shutdown()
+            flush_tracing()
             MultiPartParser.spool_max_size = old_spool_size
             MultiPartParser.max_part_size = old_part_size
 

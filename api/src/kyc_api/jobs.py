@@ -7,6 +7,9 @@ from time import perf_counter
 from typing import Callable
 
 from kyc_engine import DocumentCoordinator
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.trace import Span, Status, StatusCode
 
 from .metrics import MetricsRegistry
 from .logging import job_logging_context
@@ -83,9 +86,19 @@ class JobManager:
 
     def _run(self, session_id: str, job_id: str) -> None:
         with job_logging_context(session_id=session_id, job_id=job_id):
-            self._run_with_context(session_id, job_id)
+            with trace.get_tracer(__name__).start_as_current_span(
+                "kyc.process_job",
+                context=Context(),
+                attributes={
+                    "kyc.session_id": session_id,
+                    "kyc.job_id": job_id,
+                },
+                record_exception=False,
+                set_status_on_exception=False,
+            ) as span:
+                self._run_with_context(session_id, job_id, span)
 
-    def _run_with_context(self, session_id: str, job_id: str) -> None:
+    def _run_with_context(self, session_id: str, job_id: str, span: Span) -> None:
         started = perf_counter()
         timeout_timer: Timer | None = None
         try:
@@ -108,6 +121,7 @@ class JobManager:
             timeout_timer.daemon = True
             timeout_timer.start()
             result = self._coordinator.process(front=front, back=back)
+            span.set_attribute("kyc.processing_status", result.status.value)
             if self._store.complete(session_id, job_id, result):
                 duration_ms = (perf_counter() - started) * 1000.0
                 self._metrics.record_job(
@@ -124,6 +138,8 @@ class JobManager:
                 )
         except Exception as exc:
             duration_ms = (perf_counter() - started) * 1000.0
+            span.set_attribute("exception.type", type(exc).__name__)
+            span.set_status(Status(StatusCode.ERROR))
             logger.exception(
                 "processing job failed",
                 extra={

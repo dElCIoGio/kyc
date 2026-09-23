@@ -39,6 +39,12 @@ KYC_RATE_LIMIT_REQUESTS=120
 KYC_RATE_LIMIT_WINDOW_SECONDS=60
 KYC_JOB_TIMEOUT_SECONDS=30
 KYC_SESSION_CLEANUP_INTERVAL_SECONDS=60
+KYC_OTEL_ENABLED=false
+KYC_OTEL_ENDPOINT=
+KYC_OTEL_HEADERS=
+KYC_OTEL_TRACE_SAMPLE_RATIO=1.0
+KYC_OTEL_METRIC_EXPORT_INTERVAL_SECONDS=60
+KYC_OTEL_EXPORT_TIMEOUT_SECONDS=10
 ```
 
 Start the service from the repository root:
@@ -100,9 +106,7 @@ contains supplied `kyc.process_side` spans, which contain the same semantic
 lowercase hexadecimal `trace_id` and `span_id`, so operators can move between a
 job-ID log search and a trace view. Trace attributes contain only job/session
 IDs, side, stage, processing status, and safe exception types; they never carry
-KYC values. The engine remains usable without an SDK provider or exporter. This
-release configures no external tracing backend; exporter and deployment setup is
-intentionally deferred.
+KYC values. The engine remains usable without an SDK provider or exporter.
 
 ## Operational metrics
 
@@ -114,8 +118,38 @@ and `kyc.field.status`. Their only dimensions are bounded status, stage, side
 (`front`, `back`, or `unknown` for standalone engine work), and trusted profile
 field names. Field metrics contain a schema field name and final status only,
 never its value. Correlation IDs, trace IDs, filenames, exception messages, and
-all KYC data are prohibited from metric attributes. No production metric
-exporter is configured; external collection is deferred to Part 6.
+all KYC data are prohibited from metric attributes.
+
+## OTLP export
+
+Logs stay as structured JSON on stdout; this application does not export logs
+through OpenTelemetry. Traces and metrics can independently be exported using
+standard OTLP HTTP/protobuf by setting `KYC_OTEL_ENABLED=true`. The application
+treats `KYC_OTEL_ENDPOINT` as a base URL and derives `/v1/traces` and
+`/v1/metrics`, so do not provide a signal-specific URL. Only absolute HTTP(S)
+base URLs without embedded credentials, query strings, or fragments are accepted.
+
+```ini
+KYC_OTEL_ENABLED=true
+KYC_OTEL_ENDPOINT=https://collector.example.com
+KYC_OTEL_HEADERS=Authorization=Bearer <secret>
+KYC_OTEL_TRACE_SAMPLE_RATIO=1.0
+KYC_OTEL_METRIC_EXPORT_INTERVAL_SECONDS=60
+KYC_OTEL_EXPORT_TIMEOUT_SECONDS=10
+```
+
+`KYC_OTEL_HEADERS` is secret configuration: it is passed only to the OTLP
+exporters and is never logged, traced, or exposed by the API. Export is disabled
+by default and requires no endpoint or network access. When enabled, traces use
+a `BatchSpanProcessor` with parent-based ratio sampling; metrics use a periodic
+exporting reader. The interval and timeout are seconds, and the timeout bounds
+both exporter requests and shutdown flushing. A temporary backend outage cannot
+change KYC processing results because export is asynchronous and outside the
+pipeline/job path. The same environment variables work in Docker, VMs, or any
+container platform; no hosting-provider SDK or deployment-specific behavior is
+used. When a trace is not sampled, its spans are non-recording and the existing
+JSON formatter omits `trace_id` and `span_id`; operators can still use the
+request/session/job IDs in logs.
 
 Set `KYC_LOG_LEVEL` to a standard Python logging level (for example `DEBUG` or
 `WARNING`) and `KYC_ENVIRONMENT` to the deployment name. Logs never include

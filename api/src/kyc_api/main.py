@@ -20,7 +20,13 @@ from .jobs import JobCapacityExceeded, JobManager
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
 from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware, RequestContextMiddleware
-from .telemetry import configure_metrics, configure_tracing, flush_metrics, flush_tracing
+from .telemetry import (
+    build_otlp_export_configuration,
+    configure_metrics,
+    configure_tracing,
+    flush_metrics,
+    flush_tracing,
+)
 from .models import (
     DeleteResponse,
     DocumentSide,
@@ -65,13 +71,16 @@ def create_app(
             environment=resolved_settings.environment,
         )
         try:
+            telemetry_export = build_otlp_export_configuration(resolved_settings)
             configure_tracing(
                 environment=resolved_settings.environment,
                 service_version=__version__,
+                export=telemetry_export,
             )
             configure_metrics(
                 environment=resolved_settings.environment,
                 service_version=__version__,
+                export=telemetry_export,
             )
             resolved_store = session_store or SessionStore(
                 ttl_seconds=resolved_settings.session_ttl_seconds,
@@ -92,6 +101,14 @@ def create_app(
                 metrics=resolved_metrics,
                 executor=executor,
             )
+            if telemetry_export is not None:
+                logger.info(
+                    "OTLP telemetry export configured",
+                    extra={
+                        "event": "telemetry_export_configured",
+                        "protocol": "http/protobuf",
+                    },
+                )
         except Exception as exc:
             logger.exception(
                 "application startup failed",
@@ -128,8 +145,11 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await cleanup_task
             manager.shutdown()
-            flush_tracing()
-            flush_metrics()
+            telemetry_timeout_millis = round(
+                resolved_settings.otel_export_timeout_seconds * 1000
+            )
+            flush_tracing(timeout_millis=telemetry_timeout_millis)
+            flush_metrics(timeout_millis=telemetry_timeout_millis)
             MultiPartParser.spool_max_size = old_spool_size
             MultiPartParser.max_part_size = old_part_size
 

@@ -104,6 +104,19 @@ KYC values. The engine remains usable without an SDK provider or exporter. This
 release configures no external tracing backend; exporter and deployment setup is
 intentionally deferred.
 
+## Operational metrics
+
+`/v1/metrics` keeps its existing process-local aggregate response, including
+millisecond request/job latency summaries. In parallel, the API records standard
+OpenTelemetry metrics: `kyc.jobs`, `kyc.job.duration` (seconds),
+`kyc.stage.executions`, `kyc.stage.failures`, `kyc.stage.duration` (seconds),
+and `kyc.field.status`. Their only dimensions are bounded status, stage, side
+(`front`, `back`, or `unknown` for standalone engine work), and trusted profile
+field names. Field metrics contain a schema field name and final status only,
+never its value. Correlation IDs, trace IDs, filenames, exception messages, and
+all KYC data are prohibited from metric attributes. No production metric
+exporter is configured; external collection is deferred to Part 6.
+
 Set `KYC_LOG_LEVEL` to a standard Python logging level (for example `DEBUG` or
 `WARNING`) and `KYC_ENVIRONMENT` to the deployment name. Logs never include
 request bodies, filenames, image bytes, OCR text, extracted values, QR payloads,

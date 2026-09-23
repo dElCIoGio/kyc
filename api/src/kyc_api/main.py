@@ -20,7 +20,7 @@ from .jobs import JobCapacityExceeded, JobManager
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
 from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware, RequestContextMiddleware
-from .telemetry import configure_tracing, flush_tracing
+from .telemetry import configure_metrics, configure_tracing, flush_metrics, flush_tracing
 from .models import (
     DeleteResponse,
     DocumentSide,
@@ -66,6 +66,10 @@ def create_app(
         )
         try:
             configure_tracing(
+                environment=resolved_settings.environment,
+                service_version=__version__,
+            )
+            configure_metrics(
                 environment=resolved_settings.environment,
                 service_version=__version__,
             )
@@ -125,6 +129,7 @@ def create_app(
                 await cleanup_task
             manager.shutdown()
             flush_tracing()
+            flush_metrics()
             MultiPartParser.spool_max_size = old_spool_size
             MultiPartParser.max_part_size = old_part_size
 

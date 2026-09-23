@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Callable
 
 from kyc_engine import DocumentCoordinator
+from kyc_engine.instrumentation import pipeline_metrics_context
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace import Span, Status, StatusCode
@@ -96,7 +97,8 @@ class JobManager:
                 record_exception=False,
                 set_status_on_exception=False,
             ) as span:
-                self._run_with_context(session_id, job_id, span)
+                with pipeline_metrics_context(self._metrics):
+                    self._run_with_context(session_id, job_id, span)
 
     def _run_with_context(self, session_id: str, job_id: str, span: Span) -> None:
         started = perf_counter()
@@ -128,6 +130,7 @@ class JobManager:
                     result.status.value,
                     duration_ms,
                 )
+                self._metrics.record_field_statuses(result)
                 logger.info(
                     "processing job completed",
                     extra={

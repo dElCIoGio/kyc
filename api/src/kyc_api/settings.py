@@ -34,6 +34,11 @@ class ApiSettings(BaseSettings):
     otel_trace_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
     otel_metric_export_interval_seconds: float = Field(default=60.0, gt=0)
     otel_export_timeout_seconds: float = Field(default=10.0, gt=0)
+    webhook_url: str | None = None
+    webhook_secret: SecretStr | None = None
+    webhook_outbox_path: Path = Path("webhook-outbox.sqlite3")
+    webhook_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    webhook_retention_seconds: int = Field(default=24 * 60 * 60, gt=0)
 
     @model_validator(mode="after")
     def validate_otlp_export_configuration(self) -> "ApiSettings":
@@ -58,6 +63,27 @@ class ApiSettings(BaseSettings):
                 "KYC_OTEL_ENDPOINT must be a base endpoint, not a signal-specific OTLP URL"
             )
         return self
+
+    @model_validator(mode="after")
+    def validate_webhook_configuration(self) -> "ApiSettings":
+        if bool(self.webhook_url) != bool(self.webhook_secret):
+            raise ValueError("KYC_WEBHOOK_URL and KYC_WEBHOOK_SECRET must be configured together")
+        if not self.webhook_url:
+            return self
+        if len(self.webhook_secret.get_secret_value()) < 32:  # type: ignore[union-attr]
+            raise ValueError("KYC_WEBHOOK_SECRET must contain at least 32 characters")
+        parsed = urlsplit(self.webhook_url)
+        if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+            raise ValueError("KYC_WEBHOOK_URL must not contain credentials, a query, or a fragment")
+        if not parsed.hostname or parsed.scheme not in {"http", "https"}:
+            raise ValueError("KYC_WEBHOOK_URL must be an absolute HTTP(S) URL")
+        if parsed.scheme == "http" and parsed.hostname != "web":
+            raise ValueError("KYC_WEBHOOK_URL must use HTTPS outside the internal web service")
+        return self
+
+    @property
+    def webhook_enabled(self) -> bool:
+        return self.webhook_url is not None
 
     @property
     def max_request_bytes(self) -> int:

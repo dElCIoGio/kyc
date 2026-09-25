@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -i ./static/input.css -o ./static/app.css --minify",
+    "copy:htmx": "node -e \"require('fs').copyFileSync('node_modules/htmx.org/dist/htmx.min.js', 'static/htmx.min.js')\"",
+    "build:assets": "npm run copy:htmx && npm run build:css"
+  },
+  "devDependencies": {
+    "htmx.org": "2.0.4",
+    "tailwindcss": "3.4.17"
+  }
+}

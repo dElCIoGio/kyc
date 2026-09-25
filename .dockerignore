@@ -12,6 +12,8 @@
 venv/
 env/
 api/venv/
+node_modules/
+web/node_modules/
 **/__pycache__/
 **/*.py[cod]
 .pytest_cache/

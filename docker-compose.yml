@@ -8,8 +8,10 @@ services:
     environment:
       # The host model directory is mounted at /models in the container.
       KYC_OCR_MODEL_MANIFEST: /models/paddleocr/ao-id-front-v5-mobile/manifest.json
+    expose:
+      - "8000"
     ports:
-      - "${KYC_API_PORT:-8000}:8000"
+      - "8000:8000"
     volumes:
       - ./private-models:/models:ro
     restart: unless-stopped
@@ -23,3 +25,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 45s
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    environment:
+      KYC_API_KEY: ${KYC_API_KEY}
+      KYC_WEB_ADDRESS: :8080
+      KYC_WEB_API_URL: http://api:8000
+      KYC_WEB_MAX_UPLOAD_BYTES: ${KYC_MAX_UPLOAD_BYTES:-15728640}
+      KYC_WEB_COOKIE_SECURE: ${KYC_WEB_COOKIE_SECURE:-false}
+      KYC_WEBHOOK_SECRET: ${KYC_WEBHOOK_SECRET}
+    ports:
+      - "${KYC_WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

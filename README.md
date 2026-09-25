@@ -96,12 +96,12 @@ uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-acc
 ### Docker Compose
 
 The root [`docker-compose.yml`](docker-compose.yml) builds the installable
-engine and API together in one local service. Private OCR artifacts are never
-copied into the image: Compose mounts the ignored `private-models/` directory
-read-only at `/models`. The image build may download Python package wheels on
-its first build, and Docker reuses its build cache afterwards. It never
-downloads PaddleOCR model weights: startup requires the mounted, checksum-
-verified model directories and fails if they are absent or invalid.
+engine, API, and browser-facing KYC operator console. Private OCR artifacts are
+never copied into an image: Compose mounts the ignored `private-models/`
+directory read-only at `/models`. The image build may download Python, Go, and
+frontend dependencies on its first build, but it never downloads PaddleOCR
+model weights: startup requires the mounted, checksum-verified model directories
+and fails if they are absent or invalid.
 
 ```powershell
 Copy-Item .env.example .env
@@ -109,10 +109,19 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
-The service is available at `http://127.0.0.1:8000`; use
-`docker compose down` to stop it. The root `.env` is ignored by Git. Its model
-manifest path is suitable for direct local Uvicorn use, while Compose supplies
-the corresponding mounted `/models/...` path to the container.
+Open the operator console at `http://127.0.0.1:8080` (or the configured
+`KYC_WEB_PORT`); use `docker compose down` to stop it. The API is private to the
+Compose network and the Go console retains its API key server-side, so browsers
+never receive it. The root `.env` is ignored by Git. Its model manifest path is
+suitable for direct local Uvicorn use, while Compose supplies the corresponding
+mounted `/models/...` path to the container.
+
+The console requires a front and back JPEG/PNG image, shows upload and queued/
+running lifecycle updates, then renders a review-safe extraction summary. It
+does not persist document images or results; its in-memory browser mapping is
+lost if the console restarts, while the API's configured session TTL remains the
+authoritative retention limit. For HTTPS deployments, set
+`KYC_WEB_COOKIE_SECURE=true`.
 
 ## Data Safety
 

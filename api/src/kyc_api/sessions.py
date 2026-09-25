@@ -36,6 +36,7 @@ class SessionSnapshot:
     uploaded_sides: tuple[DocumentSide, ...]
     result_available: bool
     error_code: str | None
+    event_sequence: int = 0
 
 
 @dataclass
@@ -49,6 +50,7 @@ class _SessionRecord:
     job_id: str | None = None
     result: DocumentExtractionResult | None = None
     error_code: str | None = None
+    event_sequence: int = 0
 
 
 class SessionStore:
@@ -120,24 +122,26 @@ class SessionStore:
             record.job_id = uuid4().hex
             record.status = SessionStatus.QUEUED
             record.error_code = None
+            record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
 
-    def start(self, session_id: str, job_id: str) -> tuple[bytes | None, bytes | None]:
+    def start(self, session_id: str, job_id: str) -> tuple[bytes | None, bytes | None, SessionSnapshot]:
         with self._lock:
             record = self._get_record(session_id)
             if record.status != SessionStatus.QUEUED or record.job_id != job_id:
                 raise SessionConflict("The queued job is no longer available")
             record.status = SessionStatus.RUNNING
+            record.event_sequence += 1
             self._refresh_expiry(record)
-            return record.front, record.back
+            return record.front, record.back, _snapshot(record)
 
     def complete(
         self,
         session_id: str,
         job_id: str,
         result: DocumentExtractionResult,
-    ) -> bool:
+    ) -> SessionSnapshot | None:
         with self._lock:
             record = self._records.get(session_id)
             if (
@@ -145,7 +149,7 @@ class SessionStore:
                 or record.job_id != job_id
                 or record.status != SessionStatus.RUNNING
             ):
-                return False
+                return None
             record.front = None
             record.back = None
             record.result = result
@@ -155,10 +159,11 @@ class SessionStore:
                 ProcessingStatus.PARTIAL: SessionStatus.PARTIAL,
                 ProcessingStatus.FAILED: SessionStatus.FAILED,
             }[result.status]
+            record.event_sequence += 1
             self._refresh_expiry(record)
-            return True
+            return _snapshot(record)
 
-    def fail(self, session_id: str, job_id: str, code: str) -> bool:
+    def fail(self, session_id: str, job_id: str, code: str) -> SessionSnapshot | None:
         with self._lock:
             record = self._records.get(session_id)
             if (
@@ -166,16 +171,17 @@ class SessionStore:
                 or record.job_id != job_id
                 or record.status not in {SessionStatus.QUEUED, SessionStatus.RUNNING}
             ):
-                return False
+                return None
             record.front = None
             record.back = None
             record.result = None
             record.error_code = code
             record.status = SessionStatus.FAILED
+            record.event_sequence += 1
             self._refresh_expiry(record)
-            return True
+            return _snapshot(record)
 
-    def timeout(self, session_id: str, job_id: str) -> bool:
+    def timeout(self, session_id: str, job_id: str) -> SessionSnapshot | None:
         """Fail an overdue running job and invalidate any later completion."""
         with self._lock:
             record = self._records.get(session_id)
@@ -184,14 +190,15 @@ class SessionStore:
                 or record.job_id != job_id
                 or record.status != SessionStatus.RUNNING
             ):
-                return False
+                return None
             record.front = None
             record.back = None
             record.result = None
             record.error_code = "JOB_TIMEOUT"
             record.status = SessionStatus.FAILED
+            record.event_sequence += 1
             self._refresh_expiry(record)
-            return True
+            return _snapshot(record)
 
     def result(self, session_id: str) -> DocumentExtractionResult:
         with self._lock:
@@ -257,6 +264,7 @@ def _snapshot(record: _SessionRecord) -> SessionSnapshot:
         uploaded_sides=tuple(sides),
         result_available=record.result is not None,
         error_code=record.error_code,
+        event_sequence=record.event_sequence,
     )
 
 

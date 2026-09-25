@@ -47,6 +47,7 @@ from .sessions import (
     SessionStoreError,
 )
 from .settings import ApiSettings
+from .webhooks import WebhookDispatcher, WebhookOutbox
 
 
 _ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png"}
@@ -62,6 +63,7 @@ def create_app(
     executor: Executor | None = None,
     metrics: MetricsRegistry | None = None,
     rate_limiter: ApiKeyRateLimiter | None = None,
+    webhook_dispatcher: WebhookDispatcher | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -92,6 +94,20 @@ def create_app(
                 max_requests=resolved_settings.rate_limit_requests,
                 window_seconds=resolved_settings.rate_limit_window_seconds,
             )
+            resolved_dispatcher = webhook_dispatcher
+            if resolved_dispatcher is None and resolved_settings.webhook_enabled:
+                assert resolved_settings.webhook_url is not None
+                assert resolved_settings.webhook_secret is not None
+                resolved_dispatcher = WebhookDispatcher(
+                    outbox=WebhookOutbox(
+                        resolved_settings.webhook_outbox_path,
+                        retention_seconds=resolved_settings.webhook_retention_seconds,
+                    ),
+                    url=resolved_settings.webhook_url,
+                    secret=resolved_settings.webhook_secret.get_secret_value(),
+                    timeout_seconds=resolved_settings.webhook_timeout_seconds,
+                )
+                resolved_dispatcher.start()
             manager = JobManager(
                 resolved_coordinator,
                 resolved_store,
@@ -100,6 +116,7 @@ def create_app(
                 timeout_seconds=resolved_settings.job_timeout_seconds,
                 metrics=resolved_metrics,
                 executor=executor,
+                webhook_publisher=resolved_dispatcher.enqueue if resolved_dispatcher is not None else None,
             )
             if telemetry_export is not None:
                 logger.info(
@@ -128,6 +145,7 @@ def create_app(
         application.state.jobs = manager
         application.state.metrics = resolved_metrics
         application.state.rate_limiter = resolved_rate_limiter
+        application.state.webhook_dispatcher = resolved_dispatcher
         cleanup_stop = asyncio.Event()
         cleanup_task = asyncio.create_task(
             _cleanup_sessions(
@@ -145,6 +163,8 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await cleanup_task
             manager.shutdown()
+            if resolved_dispatcher is not None:
+                resolved_dispatcher.shutdown()
             telemetry_timeout_millis = round(
                 resolved_settings.otel_export_timeout_seconds * 1000
             )

@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .button {
+    @apply inline-flex min-h-11 items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .button-primary {
+    @apply bg-teal-700 text-white hover:bg-teal-800 focus:ring-teal-700;
+  }
+
+  .button-secondary {
+    @apply border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 focus:ring-slate-500;
+  }
+
+  .upload-card {
+    @apply overflow-hidden rounded-xl border border-dashed border-slate-300 bg-slate-50 transition hover:border-teal-500 hover:bg-teal-50/40 focus-within:border-teal-600 focus-within:ring-2 focus-within:ring-teal-600 focus-within:ring-offset-2;
+  }
+
+  .upload-card-complete {
+    @apply border-solid border-emerald-300 bg-emerald-50/50;
+  }
+
+  .upload-card.drag-over {
+    @apply border-teal-600 bg-teal-50 ring-2 ring-teal-600 ring-offset-2;
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold;
+  }
+
+  .badge-success {
+    @apply bg-emerald-100 text-emerald-800;
+  }
+
+  .badge-warning {
+    @apply bg-amber-100 text-amber-800;
+  }
+
+  .badge-danger {
+    @apply bg-rose-100 text-rose-800;
+  }
+
+  .badge-neutral {
+    @apply bg-slate-100 text-slate-700;
+  }
+
+  .status-dot {
+    @apply mt-1 h-3 w-3 shrink-0 rounded-full;
+  }
+
+  .status-success {
+    @apply bg-emerald-500;
+  }
+
+  .status-warning {
+    @apply bg-amber-500;
+  }
+
+  .status-danger {
+    @apply bg-rose-500;
+  }
+
+  .status-neutral {
+    @apply bg-teal-600;
+  }
+
+  .status-dot-busy {
+    animation: status-pulse 1.5s ease-in-out infinite;
+  }
+
+  .timeline-dot {
+    @apply absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full bg-slate-200 ring-4 ring-white;
+  }
+
+  .timeline-complete {
+    @apply bg-emerald-500;
+  }
+
+  .timeline-active {
+    @apply bg-teal-600;
+  }
+}
+
+.htmx-indicator {
+  display: none;
+}
+
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  display: inline;
+}
+
+@keyframes status-pulse {
+  50% { opacity: 0.35; transform: scale(0.8); }
+}

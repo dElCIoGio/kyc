@@ -38,6 +38,7 @@ class JobManager:
         metrics: MetricsRegistry | None = None,
         executor: Executor | None = None,
         timer_factory: Callable[[float, Callable[[], None]], Timer] = Timer,
+        webhook_publisher: Callable[[SessionSnapshot], None] | None = None,
     ) -> None:
         if workers <= 0 or capacity <= 0 or timeout_seconds <= 0:
             raise ValueError("workers, capacity, and timeout_seconds must be positive")
@@ -52,6 +53,7 @@ class JobManager:
         self._timeout_seconds = timeout_seconds
         self._metrics = metrics or MetricsRegistry()
         self._timer_factory = timer_factory
+        self._webhook_publisher = webhook_publisher
 
     def submit(self, session_id: str) -> SessionSnapshot:
         if not self._slots.acquire(blocking=False):
@@ -60,6 +62,7 @@ class JobManager:
         try:
             queued = self._store.queue(session_id)
             assert queued.job_id is not None
+            self._publish(queued)
             self._executor.submit(self._run, session_id, queued.job_id)
             return queued
         except SessionStoreError:
@@ -77,7 +80,9 @@ class JobManager:
                 },
             )
             if queued is not None and queued.job_id is not None:
-                self._store.fail(session_id, queued.job_id, "JOB_SUBMISSION_FAILED")
+                failed = self._store.fail(session_id, queued.job_id, "JOB_SUBMISSION_FAILED")
+                if failed is not None:
+                    self._publish(failed)
             self._slots.release()
             raise
 
@@ -104,7 +109,8 @@ class JobManager:
         started = perf_counter()
         timeout_timer: Timer | None = None
         try:
-            front, back = self._store.start(session_id, job_id)
+            front, back, running = self._store.start(session_id, job_id)
+            self._publish(running)
             logger.info(
                 "processing job started",
                 extra={
@@ -124,7 +130,9 @@ class JobManager:
             timeout_timer.start()
             result = self._coordinator.process(front=front, back=back)
             span.set_attribute("kyc.processing_status", result.status.value)
-            if self._store.complete(session_id, job_id, result):
+            completed = self._store.complete(session_id, job_id, result)
+            if completed is not None:
+                self._publish(completed)
                 duration_ms = (perf_counter() - started) * 1000.0
                 self._metrics.record_job(
                     result.status.value,
@@ -152,7 +160,9 @@ class JobManager:
                     "exception_type": type(exc).__name__,
                 },
             )
-            if self._store.fail(session_id, job_id, "PROCESSING_FAILED"):
+            failed = self._store.fail(session_id, job_id, "PROCESSING_FAILED")
+            if failed is not None:
+                self._publish(failed)
                 self._metrics.record_job("failed", duration_ms)
         finally:
             if timeout_timer is not None:
@@ -161,7 +171,9 @@ class JobManager:
 
     def _handle_timeout(self, session_id: str, job_id: str) -> None:
         with job_logging_context(session_id=session_id, job_id=job_id):
-            if self._store.timeout(session_id, job_id):
+            timed_out = self._store.timeout(session_id, job_id)
+            if timed_out is not None:
+                self._publish(timed_out)
                 self._metrics.record_error("JOB_TIMEOUT")
                 self._metrics.record_job("timeout", self._timeout_seconds * 1000.0)
                 logger.warning(
@@ -172,3 +184,14 @@ class JobManager:
                         "duration_ms": self._timeout_seconds * 1000.0,
                     },
                 )
+
+    def _publish(self, snapshot: SessionSnapshot) -> None:
+        if self._webhook_publisher is None:
+            return
+        try:
+            self._webhook_publisher(snapshot)
+        except Exception as exc:
+            logger.error(
+                "webhook event enqueue failed",
+                extra={"event": "webhook_enqueue_failed", "exception_type": type(exc).__name__},
+            )

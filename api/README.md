@@ -55,13 +55,14 @@ uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-acc
 
 ## Docker Compose
 
-The repository-root Compose project packages this API and the installed engine
-in one container. It passes root `.env` values into the service and mounts the
-ignored `private-models/` directory read-only at `/models`; the mounted model
-manifest path is supplied automatically to the container. The mounted files
-are the persistent model cache across container restarts. The build may fetch
-Python dependency wheels once, but PaddleOCR model weights are never downloaded
-by the service: missing or invalid local model directories fail startup.
+The repository-root Compose project packages this API, the installed engine,
+and a Go + HTMX operator console. It passes root `.env` values into the API and
+mounts the ignored `private-models/` directory read-only at `/models`; the
+mounted model manifest path is supplied automatically to the container. The
+mounted files are the persistent model cache across container restarts. The
+build may fetch Python dependency wheels once, but PaddleOCR model weights are
+never downloaded by the service: missing or invalid local model directories
+fail startup.
 
 ```powershell
 Copy-Item .env.example .env
@@ -69,10 +70,11 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
-Use `docker compose down` to stop the service. The service binds container port
-`8000`; set `KYC_API_PORT` in root `.env` to choose a different host port.
-Never place model files, real document images, or API keys in the image build
-context or Git.
+Open the operator console at `http://127.0.0.1:8080`; set `KYC_WEB_PORT` in the
+root `.env` to choose a different host port. The API's port `8000` is private to
+the Compose network, and the console proxies requests with the API key held
+server-side. Never place model files, real document images, or API keys in the
+image build context or Git.
 
 The application validates the OCR manifest and initializes both side-specific
 pipelines during startup. Startup fails when configuration or model checks fail.

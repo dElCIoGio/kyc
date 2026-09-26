@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from kyc_engine import CaptureAssessment, DocumentCaptureAssessor
+from kyc_engine import CaptureAssessment, DocumentCaptureAssessor, LivenessResult
 
 from .jobs import JobCapacityExceeded, JobManager
 from .models import DocumentSide, DocumentStatus
@@ -86,6 +86,33 @@ class VerificationManager:
             if snapshot.document.status in {DocumentStatus.QUEUED, DocumentStatus.PROCESSING}:
                 return snapshot
             raise
+
+    def start_liveness(self, session_id: str) -> SessionSnapshot:
+        snapshot = self._store.start_liveness(session_id)
+        self._publish(snapshot, "liveness.started")
+        logger.info("liveness started", extra={"event": "liveness.started"})
+        return snapshot
+
+    def complete_liveness(
+        self, session_id: str, result: LivenessResult
+    ) -> SessionSnapshot | None:
+        snapshot = self._store.complete_liveness(session_id, result)
+        if snapshot is None:
+            return None
+        transition_reason = "liveness.passed" if result.passed else "liveness.failed"
+        self._publish(snapshot, transition_reason)
+        logger.info("liveness completed", extra={"event": transition_reason})
+        return snapshot
+
+    def fail_liveness(self, session_id: str, code: str) -> SessionSnapshot | None:
+        snapshot = self._store.fail_liveness(session_id, code)
+        if snapshot is not None:
+            self._publish(snapshot, "liveness.failed")
+            logger.warning(
+                "liveness failed",
+                extra={"event": "liveness.failed", "error_code": code},
+            )
+        return snapshot
 
     def _publish(self, snapshot: SessionSnapshot, transition_reason: str) -> None:
         if self._snapshot_publisher is None:

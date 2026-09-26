@@ -111,7 +111,11 @@ class JobManager:
         started = perf_counter()
         timeout_timer: Timer | None = None
         try:
-            front, back, running = self._store.start_document_processing(session_id, job_id)
+            try:
+                front, back, running = self._store.start_document_processing(session_id, job_id)
+            except SessionStoreError:
+                span.set_attribute("kyc.job_discarded", True)
+                return
             self._publish(running, "document.processing_started")
             logger.info(
                 "processing job started",

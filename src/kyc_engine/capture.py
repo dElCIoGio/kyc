@@ -22,6 +22,8 @@ class CaptureAssessmentInputError(ValueError):
 
 @dataclass(frozen=True)
 class CaptureAssessmentConfig:
+    """Initial uncalibrated defaults for the deterministic capture gate."""
+
     min_sharpness: float = 25.0
     min_brightness: float = 35.0
     max_brightness: float = 220.0

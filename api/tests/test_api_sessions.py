@@ -11,12 +11,12 @@ from threading import Event
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from kyc_engine import DocumentCaptureAssessor
+from kyc_engine import DocumentCaptureAssessor, LivenessResult
 from kyc_engine.intake import ImageIntake
 from kyc_api.jobs import JobCapacityExceeded, JobManager
 from kyc_api.main import create_app
-from kyc_api.models import DocumentSide
-from kyc_api.sessions import SessionConflict, SessionStore, _now
+from kyc_api.models import DocumentSide, VerificationStatus
+from kyc_api.sessions import SessionConflict, SessionNotFound, SessionStore, _now
 from kyc_api.verification import VerificationManager
 from kyc_api.webhooks import WebhookEvent
 
@@ -26,6 +26,7 @@ from helpers import (
     FakeCoordinator,
     accept_document,
     accepted_capture_assessment,
+    extraction_result,
     settings,
 )
 
@@ -216,6 +217,94 @@ class ApiSessionTests(unittest.TestCase):
         self.assertEqual(1, store.cleanup())
         self.assertFalse(store.contains_images(session_id))
 
+    def test_expiration_removes_awaiting_and_ready_verifications(self) -> None:
+        store = SessionStore(ttl_seconds=60, max_sessions=3)
+        awaiting = store.create().session_id
+        ready = store.create().session_id
+        accept_document(store, ready)
+        ready_record = store._records[ready]
+        for session_id in (awaiting, ready):
+            store._records[session_id].expires_at = _now() - timedelta(seconds=1)
+
+        self.assertEqual(2, store.cleanup())
+        self.assertNotIn(awaiting, store._records)
+        self.assertNotIn(ready, store._records)
+        self.assertIsNone(ready_record.document.front)
+        self.assertIsNone(ready_record.document.back)
+        with self.assertRaises(SessionNotFound):
+            store.get(ready)
+
+    def test_expiration_invalidates_queued_and_processing_document_work(self) -> None:
+        store = SessionStore(ttl_seconds=60, max_sessions=3)
+        queued = store.create().session_id
+        processing = store.create().session_id
+        accept_document(store, queued)
+        queued_job = store.queue_document_processing(queued).document.job_id
+        assert queued_job is not None
+        accept_document(store, processing)
+        processing_job = store.queue_document_processing(processing).document.job_id
+        assert processing_job is not None
+        store.start_document_processing(processing, processing_job)
+        processing_record = store._records[processing]
+        for session_id in (queued, processing):
+            store._records[session_id].expires_at = _now() - timedelta(seconds=1)
+
+        self.assertEqual(2, store.cleanup())
+        self.assertIsNone(processing_record.document.front)
+        self.assertIsNone(processing_record.document.back)
+        self.assertIsNone(store.complete_document_processing(processing, processing_job, extraction_result()))
+        with self.assertRaises(SessionNotFound):
+            store.start_document_processing(queued, queued_job)
+
+    def test_liveness_transitions_are_independent_and_snapshot_safe(self) -> None:
+        store = SessionStore(ttl_seconds=60, max_sessions=2)
+        session_id = store.create().session_id
+        with self.assertRaises(SessionConflict):
+            store.start_liveness(session_id)
+
+        accept_document(store, session_id)
+        self.assertIsNone(
+            store.complete_liveness(
+                session_id, LivenessResult(True, 0.9, frames_evaluated=3, real_frames=3)
+            )
+        )
+        running = store.start_liveness(session_id)
+        self.assertEqual("processing", running.liveness_status.value)
+        with self.assertRaises(SessionConflict):
+            store.start_liveness(session_id)
+
+        completed = store.complete_liveness(
+            session_id, LivenessResult(True, 0.9, frames_evaluated=3, real_frames=3)
+        )
+        assert completed is not None
+        self.assertEqual("passed", completed.liveness_status.value)
+        self.assertEqual("in_progress", completed.verification_status.value)
+        self.assertEqual("blocked", completed.face_match_status.value)
+        self.assertFalse(hasattr(completed, "liveness_result"))
+        with self.assertRaises(SessionConflict):
+            store.start_liveness(session_id)
+
+    def test_liveness_failure_and_terminal_verification_do_not_restart(self) -> None:
+        store = SessionStore(ttl_seconds=60, max_sessions=2)
+        failed = store.create().session_id
+        accept_document(store, failed)
+        store.start_liveness(failed)
+        snapshot = store.fail_liveness(failed, "LIVENESS_UNAVAILABLE")
+        assert snapshot is not None
+        self.assertEqual("failed", snapshot.liveness_status.value)
+        self.assertIsNone(store.fail_liveness(failed, "LIVENESS_UNAVAILABLE"))
+
+        terminal = store.create().session_id
+        accept_document(store, terminal)
+        store._records[terminal].status = VerificationStatus.REJECTED
+        with self.assertRaises(SessionConflict):
+            store.start_liveness(terminal)
+        self.assertIsNone(
+            store.complete_liveness(
+                terminal, LivenessResult(True, 0.9, frames_evaluated=3, real_frames=3)
+            )
+        )
+
     def _wait_with_client(self, client: TestClient, session_id: str) -> dict:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -264,6 +353,58 @@ class JobManagerTests(unittest.TestCase):
             finally:
                 release.set()
                 jobs.shutdown()
+
+    def test_expired_active_job_clears_bytes_and_cannot_recreate_the_session(self) -> None:
+        started, release = Event(), Event()
+        store = SessionStore(ttl_seconds=60, max_sessions=2)
+        session_id = store.create().session_id
+        accept_document(store, session_id)
+        coordinator = FakeCoordinator(started=started, release=release)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            jobs = JobManager(coordinator, store, workers=1, capacity=1, executor=executor)
+            jobs.submit_document_processing(session_id)
+            self.assertTrue(started.wait(timeout=1))
+            record = store._records[session_id]
+            record.expires_at = _now() - timedelta(seconds=1)
+            self.assertEqual(1, store.cleanup())
+            self.assertIsNone(record.document.front)
+            self.assertIsNone(record.document.back)
+            release.set()
+        self.assertNotIn(session_id, store._records)
+
+    def test_expired_queued_worker_is_discarded_before_processing_starts(self) -> None:
+        gate = Event()
+        store = SessionStore(ttl_seconds=60, max_sessions=2)
+        session_id = store.create().session_id
+        accept_document(store, session_id)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(gate.wait)
+            try:
+                jobs = JobManager(FakeCoordinator(), store, workers=1, capacity=1, executor=executor)
+                jobs.submit_document_processing(session_id)
+                store._records[session_id].expires_at = _now() - timedelta(seconds=1)
+                self.assertEqual(1, store.cleanup())
+            finally:
+                gate.set()
+        self.assertNotIn(session_id, store._records)
+
+    def test_verification_manager_publishes_safe_liveness_transitions(self) -> None:
+        store = SessionStore(ttl_seconds=60, max_sessions=2)
+        session_id = store.create().session_id
+        accept_document(store, session_id)
+        transitions: list[str] = []
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            manager = VerificationManager(
+                assessor=DocumentCaptureAssessor(ImageIntake()),
+                store=store,
+                jobs=JobManager(FakeCoordinator(), store, workers=1, capacity=1, executor=executor),
+                snapshot_publisher=lambda snapshot, reason: transitions.append(reason),
+            )
+            manager.start_liveness(session_id)
+            manager.complete_liveness(
+                session_id, LivenessResult(True, 0.9, frames_evaluated=3, real_frames=3)
+            )
+        self.assertEqual(["liveness.started", "liveness.passed"], transitions)
 
 
 if __name__ == "__main__":

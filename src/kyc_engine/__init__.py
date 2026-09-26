@@ -5,6 +5,8 @@ import logging
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 from .contracts import (
+    AntiSpoofDetector,
+    AntiSpoofResult,
     BoundingBox,
     CaptureAssessment,
     CaptureIssue,
@@ -18,6 +20,7 @@ from .contracts import (
     ImageSource,
     InputImage,
     KycExtractionResult,
+    LivenessResult,
     OCRCandidate,
     PipelineIssue,
     Point,
@@ -28,6 +31,7 @@ from .contracts import (
     Quadrilateral,
 )
 from .capture import CaptureAssessmentConfig, CaptureAssessmentInputError, DocumentCaptureAssessor
+from .liveness import LivenessEvaluationConfig, LivenessEvaluator
 from .intake import IntakeLimits
 from .pipeline import KycPipeline
 from .coordinator import DocumentCoordinator, DocumentExtractionResult
@@ -37,6 +41,8 @@ from .ocr import PaddleOcrModelManifest, PaddleOCRTextRecognizer, TextRecognizer
 from .qr import QrCodeExtractor
 
 __all__ = [
+    "AntiSpoofDetector",
+    "AntiSpoofResult",
     "BoundingBox",
     "CaptureAssessment",
     "CaptureAssessmentConfig",
@@ -54,6 +60,9 @@ __all__ = [
     "IntakeLimits",
     "KycExtractionResult",
     "KycPipeline",
+    "LivenessEvaluationConfig",
+    "LivenessEvaluator",
+    "LivenessResult",
     "build_paddle_document_coordinator",
     "DocumentCoordinator",
     "DocumentCaptureAssessor",

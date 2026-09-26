@@ -5,7 +5,12 @@ from datetime import UTC, datetime, timedelta
 from threading import RLock
 from uuid import uuid4
 
-from kyc_engine import CaptureAssessment, DocumentExtractionResult, ProcessingStatus
+from kyc_engine import (
+    CaptureAssessment,
+    DocumentExtractionResult,
+    LivenessResult,
+    ProcessingStatus,
+)
 
 from .models import (
     CaptureStatus,
@@ -77,6 +82,8 @@ class _DocumentState:
 @dataclass
 class _LivenessState:
     status: LivenessStatus = LivenessStatus.BLOCKED
+    result: LivenessResult | None = None
+    error_code: str | None = None
 
 
 @dataclass
@@ -277,6 +284,55 @@ class SessionStore:
             self._refresh_expiry(record)
             return _snapshot(record)
 
+    def start_liveness(self, session_id: str) -> SessionSnapshot:
+        with self._lock:
+            record = self._get_record(session_id)
+            if record.status != VerificationStatus.IN_PROGRESS:
+                raise SessionConflict("Verification is no longer active")
+            if record.liveness.status != LivenessStatus.READY:
+                raise SessionConflict("Liveness is not ready to start")
+            record.liveness.status = LivenessStatus.PROCESSING
+            record.liveness.error_code = None
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def complete_liveness(
+        self, session_id: str, result: LivenessResult
+    ) -> SessionSnapshot | None:
+        with self._lock:
+            record = self._records.get(session_id)
+            if (
+                record is None
+                or record.status != VerificationStatus.IN_PROGRESS
+                or record.liveness.status != LivenessStatus.PROCESSING
+            ):
+                return None
+            record.liveness.result = result
+            record.liveness.error_code = None
+            record.liveness.status = (
+                LivenessStatus.PASSED if result.passed else LivenessStatus.FAILED
+            )
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def fail_liveness(self, session_id: str, code: str) -> SessionSnapshot | None:
+        with self._lock:
+            record = self._records.get(session_id)
+            if (
+                record is None
+                or record.status != VerificationStatus.IN_PROGRESS
+                or record.liveness.status != LivenessStatus.PROCESSING
+            ):
+                return None
+            record.liveness.result = None
+            record.liveness.error_code = code
+            record.liveness.status = LivenessStatus.FAILED
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
     def result(self, session_id: str) -> DocumentExtractionResult:
         with self._lock:
             record = self._get_record(session_id)
@@ -322,8 +378,7 @@ class SessionStore:
         expired = [
             session_id
             for session_id, record in self._records.items()
-            if record.document.status not in self._DOCUMENT_PROCESSING
-            and record.expires_at <= now
+            if record.expires_at <= now
         ]
         for session_id in expired:
             record = self._records.pop(session_id)
@@ -374,6 +429,8 @@ def _clear_sensitive_state(record: _SessionRecord) -> None:
     record.document.front_capture = None
     record.document.back_capture = None
     record.document.result = None
+    record.liveness.result = None
+    record.liveness.error_code = None
 
 
 def _now() -> datetime:

@@ -180,7 +180,10 @@ Each session is one verification. It begins with document capture awaiting both
 sides, liveness blocked, and face matching blocked. Upload the front and back
 images using the returned ID. Every upload is assessed before it is retained;
 an ordinary quality rejection returns `200` with `accepted: false` and safe
-issue codes, so the caller can retry without changing stored captures.
+issue codes, so the caller can retry without changing stored captures. The
+capture sharpness, exposure, and contrast thresholds are initial uncalibrated
+defaults and must be calibrated against representative captures before
+production tuning.
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/images/front `

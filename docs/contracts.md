@@ -47,7 +47,16 @@ decode and validation path, then reports immutable `CaptureAssessment` values:
 
 The initial gate reports `too_blurry`, `too_dark`, `overexposed`, and
 `low_contrast`; it is intentionally not a document detector, OCR, authenticity,
-or face-quality check.
+or face-quality check. Its thresholds are initial uncalibrated defaults, not
+production-calibrated quality policy.
+
+## Liveness Contracts
+
+`AntiSpoofDetector` is the model adapter boundary: it evaluates one existing
+decoded `Image` frame and returns an `AntiSpoofResult`. `LivenessEvaluator`
+aggregates ordered frame decisions into a safe `LivenessResult` without
+retaining frames. Its three-frame/two-real policy is an initial uncalibrated
+development default; it has no dependency on a specific anti-spoof model.
 
 ## Profile Contracts
 

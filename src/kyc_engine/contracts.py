@@ -5,7 +5,7 @@ from enum import Enum
 from math import isfinite
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, TypeAlias
+from typing import Any, Mapping, Protocol, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -145,6 +145,61 @@ class CaptureAssessment:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "issues", tuple(self.issues))
+
+
+@dataclass(frozen=True)
+class AntiSpoofResult:
+    """One passive anti-spoof decision for one decoded frame."""
+
+    is_real: bool
+    score: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.is_real, bool):
+            raise TypeError("Anti-spoof is_real must be a boolean")
+        if (
+            not isinstance(self.score, (int, float))
+            or isinstance(self.score, bool)
+            or not isfinite(self.score)
+            or not 0.0 <= self.score <= 1.0
+        ):
+            raise ValueError("Anti-spoof score must be finite and between 0 and 1")
+        object.__setattr__(self, "score", float(self.score))
+
+
+class AntiSpoofDetector(Protocol):
+    """Adapter boundary for one-frame passive anti-spoof models."""
+
+    def detect(self, frame: Image) -> AntiSpoofResult: ...
+
+
+@dataclass(frozen=True)
+class LivenessResult:
+    """Safe aggregate outcome for one liveness evaluation session."""
+
+    passed: bool
+    passive_score: float
+    frames_evaluated: int
+    real_frames: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.passed, bool):
+            raise TypeError("Liveness passed must be a boolean")
+        if (
+            not isinstance(self.passive_score, (int, float))
+            or isinstance(self.passive_score, bool)
+            or not isfinite(self.passive_score)
+            or not 0.0 <= self.passive_score <= 1.0
+        ):
+            raise ValueError("Liveness passive_score must be finite and between 0 and 1")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in (self.frames_evaluated, self.real_frames)
+        ):
+            raise TypeError("Liveness frame counts must be integers")
+        if self.frames_evaluated < 0 or not 0 <= self.real_frames <= self.frames_evaluated:
+            raise ValueError("Liveness frame counts must be internally consistent")
+        object.__setattr__(self, "passive_score", float(self.passive_score))
 
 
 @dataclass(frozen=True)

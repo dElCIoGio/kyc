@@ -215,6 +215,44 @@ class StructuredLoggingTests(unittest.TestCase):
         self.assertNotIn("extracted_value", payload)
         self.assertNotIn("synthetic-private-id-123456789", stream.getvalue())
 
+    def test_formatter_allows_live_face_selection_metadata_but_not_pixels(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonFormatter(environment="test"))
+        logger = logging.getLogger("logging-test.live-face")
+        original_handlers, original_level, original_propagate = (
+            logger.handlers[:], logger.level, logger.propagate
+        )
+        logger.handlers = [handler]
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        try:
+            logger.info(
+                "selection",
+                extra={
+                    "event": "liveness.live_face_selection",
+                    "candidate_frame_count": 3,
+                    "eligible_frame_count": 2,
+                    "selected_frame_index": 1,
+                    "face_detected": True,
+                    "face_count": 1,
+                    "quality_score": 0.75,
+                    "selection_outcome": "selected",
+                    "face_crop": "synthetic-pixels-must-not-log",
+                },
+            )
+        finally:
+            logger.handlers = original_handlers
+            logger.setLevel(original_level)
+            logger.propagate = original_propagate
+
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(3, payload["candidate_frame_count"])
+        self.assertEqual(1, payload["selected_frame_index"])
+        self.assertEqual("selected", payload["selection_outcome"])
+        self.assertNotIn("face_crop", payload)
+        self.assertNotIn("synthetic-pixels-must-not-log", stream.getvalue())
+
     def test_stage_failure_json_omits_exception_message(self) -> None:
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)

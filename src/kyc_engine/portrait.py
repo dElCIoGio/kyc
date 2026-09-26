@@ -85,7 +85,7 @@ class PortraitExtractor:
         definition: PortraitDefinition | None,
     ) -> PortraitExtractionResult:
         if definition is None:
-            return _result(PortraitStatus.NOT_CONFIGURED, None, None, warnings=("PORTRAIT_REGION_NOT_FOUND",))
+            return _result(PortraitStatus.NOT_CONFIGURED, None, None, warnings=())
         try:
             height, width = image.shape[:2]
             region = _clamp(definition, width, height)

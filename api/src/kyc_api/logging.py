@@ -16,7 +16,9 @@ from opentelemetry import trace
 
 _SAFE_FIELDS = (
     "request_id", "session_id", "job_id", "side", "sides", "stage", "status", "duration_ms",
-    "error_code", "exception_type", "field", "protocol",
+    "error_code", "exception_type", "field", "protocol", "candidate_frame_count",
+    "eligible_frame_count", "selected_frame_index", "face_detected", "face_count",
+    "quality_score", "selection_outcome",
 )
 _HANDLER_MARKER = "_kyc_json_handler"
 

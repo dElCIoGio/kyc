@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import unittest
 
+import cv2
 import numpy as np
 
 from kyc_engine import (
     AntiSpoofResult,
+    BoundingBox,
+    FaceCandidate,
+    FaceDetectionResult,
     LivenessEvaluationConfig,
     LivenessEvaluator,
 )
@@ -19,6 +23,30 @@ class FakeAntiSpoofDetector:
     def detect(self, frame: np.ndarray) -> AntiSpoofResult:
         self.frames.append(frame)
         return next(self._results)
+
+
+class FakeFaceDetector:
+    def __init__(self, candidates: list[tuple[FaceCandidate, ...]]) -> None:
+        self._candidates = iter(candidates)
+        self.frames: list[np.ndarray] = []
+
+    def detect(self, frame: np.ndarray) -> FaceDetectionResult:
+        self.frames.append(frame)
+        return FaceDetectionResult(next(self._candidates))
+
+
+def _frame(*, blurred: bool = False) -> np.ndarray:
+    frame = np.full((200, 200, 3), 128, dtype=np.uint8)
+    checker = ((np.indices((80, 80)).sum(axis=0) // 8) % 2 * 180 + 35)
+    checker = checker.astype(np.uint8)
+    if blurred:
+        checker = cv2.GaussianBlur(checker, (9, 9), 2)
+    frame[60:140, 60:140] = np.repeat(checker[:, :, None], 3, axis=2)
+    return frame
+
+
+def _face(x: int = 60, y: int = 60, width: int = 80, height: int = 80) -> FaceCandidate:
+    return FaceCandidate(BoundingBox(x, y, width, height))
 
 
 class LivenessEvaluatorTests(unittest.TestCase):
@@ -95,6 +123,74 @@ class LivenessEvaluatorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "detector unavailable"):
             LivenessEvaluator(FailingDetector()).evaluate(self.frames)
+
+    def test_no_eligible_live_face_keeps_the_passive_result_unchanged(self) -> None:
+        evaluator = LivenessEvaluator(
+            FakeAntiSpoofDetector([AntiSpoofResult(True, 0.9)] * 3),
+            face_detector=FakeFaceDetector([(), (), ()]),
+        )
+        evaluation = evaluator.evaluate_with_live_face([_frame()] * 3)
+
+        self.assertTrue(evaluation.result.passed)
+        self.assertEqual(3, evaluation.live_face.candidate_frame_count)
+        self.assertEqual(0, evaluation.live_face.eligible_frame_count)
+        self.assertIsNone(evaluation.live_face.selected_frame_index)
+        self.assertEqual("no_eligible_frame", evaluation.live_face.selection_outcome)
+
+    def test_one_eligible_live_face_returns_a_readonly_crop(self) -> None:
+        evaluator = LivenessEvaluator(
+            FakeAntiSpoofDetector([AntiSpoofResult(True, 0.9)] * 3),
+            face_detector=FakeFaceDetector([(_face(),), (), ()]),
+        )
+        evaluation = evaluator.evaluate_with_live_face([_frame()] * 3)
+
+        self.assertEqual(0, evaluation.live_face.selected_frame_index)
+        self.assertEqual(1, evaluation.live_face.eligible_frame_count)
+        assert evaluation.live_face.face_crop is not None
+        self.assertEqual((80, 80, 3), evaluation.live_face.face_crop.shape)
+        self.assertFalse(evaluation.live_face.face_crop.flags.writeable)
+
+    def test_several_eligible_frames_choose_the_best_deterministically(self) -> None:
+        config = LivenessEvaluationConfig(min_sharpness=0.0)
+        evaluator = LivenessEvaluator(
+            FakeAntiSpoofDetector([AntiSpoofResult(True, 0.9)] * 3),
+            config,
+            FakeFaceDetector([(_face(),), (_face(),), (_face(),)]),
+        )
+        evaluation = evaluator.evaluate_with_live_face([_frame(), _frame(), _frame()])
+
+        self.assertEqual(0, evaluation.live_face.selected_frame_index)
+        self.assertEqual(3, evaluation.live_face.eligible_frame_count)
+
+    def test_blurry_high_liveness_frame_loses_to_a_sharper_usable_frame(self) -> None:
+        config = LivenessEvaluationConfig(min_sharpness=0.0)
+        evaluator = LivenessEvaluator(
+            FakeAntiSpoofDetector(
+                [AntiSpoofResult(True, 1.0), AntiSpoofResult(True, 0.8), AntiSpoofResult(False, 0.1)]
+            ),
+            config,
+            FakeFaceDetector([(_face(),), (_face(),)]),
+        )
+        evaluation = evaluator.evaluate_with_live_face([_frame(blurred=True), _frame(), _frame()])
+
+        self.assertTrue(evaluation.result.passed)
+        self.assertEqual(1, evaluation.live_face.selected_frame_index)
+
+    def test_multiple_and_too_small_faces_are_rejected(self) -> None:
+        multi = LivenessEvaluator(
+            FakeAntiSpoofDetector([AntiSpoofResult(True, 0.9)] * 3),
+            face_detector=FakeFaceDetector([(_face(), _face(10, 10)), (), ()]),
+        ).evaluate_with_live_face([_frame()] * 3)
+        self.assertEqual(0, multi.live_face.eligible_frame_count)
+        self.assertTrue(multi.live_face.face_detected)
+        self.assertEqual(2, multi.live_face.face_count)
+
+        small = LivenessEvaluator(
+            FakeAntiSpoofDetector([AntiSpoofResult(True, 0.9)] * 3),
+            face_detector=FakeFaceDetector([(_face(85, 85, 30, 30),), (), ()]),
+        ).evaluate_with_live_face([_frame()] * 3)
+        self.assertEqual(0, small.live_face.eligible_frame_count)
+        self.assertEqual("no_eligible_frame", small.live_face.selection_outcome)
 
 
 if __name__ == "__main__":

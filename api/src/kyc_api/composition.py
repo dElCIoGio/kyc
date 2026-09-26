@@ -11,6 +11,7 @@ from kyc_engine import (
     LivenessEvaluationConfig,
     LivenessEvaluator,
     MiniFASNetAntiSpoofDetector,
+    OpenCVHaarFaceDetector,
     build_paddle_document_coordinator,
 )
 from kyc_engine.intake import ImageIntake
@@ -51,12 +52,14 @@ def create_liveness_evaluator(settings: ApiSettings) -> LivenessEvaluator | None
         return None
     assert settings.liveness_model_root is not None
     detector = MiniFASNetAntiSpoofDetector(settings.liveness_model_root)
+    face_detector = OpenCVHaarFaceDetector()
     return LivenessEvaluator(
         detector,
         LivenessEvaluationConfig(
             frame_count=settings.liveness_frame_count,
             minimum_real_ratio=settings.liveness_min_real_ratio,
         ),
+        face_detector=face_detector,
     )
 
 

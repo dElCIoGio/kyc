@@ -11,6 +11,7 @@ from kyc_engine import (
     LivenessResult,
     ProcessingStatus,
 )
+from kyc_engine.contracts import Image
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 from .models import (
@@ -85,6 +86,8 @@ class _LivenessState:
     status: LivenessStatus = LivenessStatus.BLOCKED
     result: LivenessResult | None = None
     error_code: str | None = None
+    live_face_artifact_id: str | None = None
+    live_face_eligible: bool = False
 
 
 @dataclass
@@ -324,7 +327,11 @@ class SessionStore:
             return _snapshot(record)
 
     def complete_liveness(
-        self, session_id: str, result: LivenessResult
+        self,
+        session_id: str,
+        result: LivenessResult,
+        live_face_artifact_id: str | None = None,
+        live_face_eligible: bool = False,
     ) -> SessionSnapshot | None:
         with self._lock:
             record = self._records.get(session_id)
@@ -333,8 +340,21 @@ class SessionStore:
                 or record.status != VerificationStatus.IN_PROGRESS
                 or record.liveness.status != LivenessStatus.PROCESSING
             ):
+                self._release_pending_live_face(live_face_artifact_id)
                 return None
+            claimed_artifact_id = None
+            if live_face_artifact_id is not None and result.passed and live_face_eligible:
+                if self.portrait_artifacts is not None and self.portrait_artifacts.claim(
+                    (live_face_artifact_id,), session_id
+                ):
+                    claimed_artifact_id = live_face_artifact_id
+                else:
+                    self._release_pending_live_face(live_face_artifact_id)
+            elif live_face_artifact_id is not None:
+                self._release_pending_live_face(live_face_artifact_id)
             record.liveness.result = result
+            record.liveness.live_face_artifact_id = claimed_artifact_id
+            record.liveness.live_face_eligible = claimed_artifact_id is not None
             record.liveness.status = (
                 LivenessStatus.PASSED if result.passed else LivenessStatus.FAILED
             )
@@ -354,6 +374,7 @@ class SessionStore:
                 or record.liveness.status != LivenessStatus.PROCESSING
             ):
                 return None
+            self._release_owned_live_face(record)
             record.liveness.result = None
             record.liveness.error_code = code
             record.liveness.status = LivenessStatus.FAILED
@@ -386,6 +407,24 @@ class SessionStore:
             if portrait is None or portrait.artifact_id is None or self.portrait_artifacts is None:
                 return None
             return self.portrait_artifacts.get(portrait.artifact_id, session_id=session_id)
+
+    def resolve_live_face_artifact(self, session_id: str) -> Image | None:
+        """Internal-only future matcher boundary for the retained live face."""
+        with self._lock:
+            record = self._get_record(session_id)
+            liveness = record.liveness
+            if (
+                liveness.status != LivenessStatus.PASSED
+                or liveness.result is None
+                or not liveness.result.passed
+                or not liveness.live_face_eligible
+                or liveness.live_face_artifact_id is None
+                or self.portrait_artifacts is None
+            ):
+                return None
+            return self.portrait_artifacts.get(
+                liveness.live_face_artifact_id, session_id=session_id
+            )
 
     def contains_images(self, session_id: str) -> bool:
         """Testing and diagnostics helper; never exposes image bytes."""
@@ -432,7 +471,20 @@ class SessionStore:
             self.portrait_artifacts.release_owned(
                 _portrait_artifact_ids(record.document.result), record.session_id
             )
+            self._release_owned_live_face(record)
         _clear_sensitive_state(record)
+
+    def _release_pending_live_face(self, artifact_id: str | None) -> None:
+        if artifact_id is not None and self.portrait_artifacts is not None:
+            self.portrait_artifacts.release_pending((artifact_id,))
+
+    def _release_owned_live_face(self, record: _SessionRecord) -> None:
+        if record.liveness.live_face_artifact_id is not None and self.portrait_artifacts is not None:
+            self.portrait_artifacts.release_owned(
+                (record.liveness.live_face_artifact_id,), record.session_id
+            )
+        record.liveness.live_face_artifact_id = None
+        record.liveness.live_face_eligible = False
 
 
 def _snapshot(record: _SessionRecord) -> SessionSnapshot:
@@ -476,6 +528,8 @@ def _clear_sensitive_state(record: _SessionRecord) -> None:
     record.document.result = None
     record.liveness.result = None
     record.liveness.error_code = None
+    record.liveness.live_face_artifact_id = None
+    record.liveness.live_face_eligible = False
 
 
 def _portrait_artifact_ids(result: DocumentExtractionResult | None) -> tuple[str, ...]:

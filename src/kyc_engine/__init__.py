@@ -37,7 +37,14 @@ from .contracts import (
     Quadrilateral,
 )
 from .capture import CaptureAssessmentConfig, CaptureAssessmentInputError, DocumentCaptureAssessor
-from .liveness import LivenessEvaluationConfig, LivenessEvaluator, LivenessFrameError, LivenessNoFaceError
+from .liveness import (
+    LiveFaceSelection,
+    LivenessEvaluation,
+    LivenessEvaluationConfig,
+    LivenessEvaluator,
+    LivenessFrameError,
+    LivenessNoFaceError,
+)
 from .minifasnet import (
     MiniFASNetAntiSpoofDetector,
     MiniFASNetError,
@@ -79,10 +86,12 @@ __all__ = [
     "KycExtractionResult",
     "KycPipeline",
     "LivenessEvaluationConfig",
+    "LivenessEvaluation",
     "LivenessEvaluator",
     "LivenessFrameError",
     "LivenessNoFaceError",
     "LivenessResult",
+    "LiveFaceSelection",
     "MiniFASNetAntiSpoofDetector",
     "MiniFASNetError",
     "MiniFASNetInitializationError",

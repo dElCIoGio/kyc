@@ -202,6 +202,10 @@ class CorePipelineTests(unittest.TestCase):
         self.assertEqual(QrCodeStatus.DECODED, result.qr_code.status if result.qr_code else None)
         self.assertEqual("MARIA SILVA", result.qr_code.data.full_name if result.qr_code and result.qr_code.data else None)
         self.assertEqual("RUA EXEMPLO 10", result.fields["residence"].raw_value)
+        assert result.portrait is not None
+        self.assertEqual("not_configured", result.portrait.status.value)
+        self.assertEqual((), result.portrait.warnings)
+        self.assertFalse(any(issue.stage == "portrait_extraction" for issue in result.issues))
         payload = result.to_dict()
         self.assertIn("qr_code", payload)
         self.assertNotIn("image", str(payload).lower())

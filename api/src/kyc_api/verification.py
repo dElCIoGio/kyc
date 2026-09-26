@@ -161,7 +161,9 @@ class VerificationManager:
         frames = self._decode_liveness_frames(encoded_frames, intake)
         self.start_liveness(session_id)
         try:
-            result = evaluator.evaluate(frames)
+            evaluated = getattr(evaluator, "evaluate_with_live_face", None)
+            evaluation = evaluated(frames) if callable(evaluated) else None
+            result = evaluation.result if evaluation is not None else evaluator.evaluate(frames)
         except LivenessFrameError as exc:
             self._fail_liveness_or_conflict(session_id, "LIVENESS_CAPTURE_FAILED")
             raise LivenessInputError(
@@ -175,21 +177,70 @@ class VerificationManager:
             )
             raise LivenessOperationalError("Liveness evaluation could not be completed") from exc
 
-        completed = self.complete_liveness(session_id, result)
+        artifact_id = None
+        selection = evaluation.live_face if evaluation is not None else None
+        if result.passed and selection is not None and selection.face_crop is not None:
+            artifacts = self._store.portrait_artifacts
+            if artifacts is not None:
+                try:
+                    artifact_id = artifacts.put(selection.face_crop)
+                except Exception:
+                    logger.warning(
+                        "live face artifact retention failed",
+                        extra={"event": "liveness.live_face_retention_failed"},
+                    )
+        completed = self.complete_liveness(
+            session_id,
+            result,
+            artifact_id,
+            live_face_eligible=selection is not None and selection.face_crop is not None,
+        )
         if completed is None:
             raise SessionConflict("Liveness completion is no longer applicable")
+        if selection is not None:
+            self._log_live_face_selection(selection)
         return LivenessSubmission(result=result, snapshot=completed)
 
     def complete_liveness(
-        self, session_id: str, result: LivenessResult
+        self,
+        session_id: str,
+        result: LivenessResult,
+        live_face_artifact_id: str | None = None,
+        *,
+        live_face_eligible: bool = False,
     ) -> SessionSnapshot | None:
-        snapshot = self._store.complete_liveness(session_id, result)
+        snapshot = self._store.complete_liveness(
+            session_id,
+            result,
+            live_face_artifact_id,
+            live_face_eligible,
+        )
         if snapshot is None:
             return None
         transition_reason = "liveness.passed" if result.passed else "liveness.failed"
         self._publish(snapshot, transition_reason)
         logger.info("liveness completed", extra={"event": transition_reason})
         return snapshot
+
+    def _log_live_face_selection(self, selection) -> None:
+        """Emit only safe selection metadata; the crop never reaches logging."""
+        logger.info(
+            "live face selection evaluated",
+            extra={
+                "event": "liveness.live_face_selection",
+                "candidate_frame_count": selection.candidate_frame_count,
+                "eligible_frame_count": selection.eligible_frame_count,
+                "selected_frame_index": (
+                    selection.selected_frame_index
+                    if selection.selected_frame_index is not None
+                    else -1
+                ),
+                "face_detected": selection.face_detected,
+                "face_count": selection.face_count,
+                "quality_score": selection.quality_score or 0.0,
+                "selection_outcome": selection.selection_outcome,
+            },
+        )
 
     def fail_liveness(self, session_id: str, code: str) -> SessionSnapshot | None:
         snapshot = self._store.fail_liveness(session_id, code)

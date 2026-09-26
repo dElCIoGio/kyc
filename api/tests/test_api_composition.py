@@ -28,10 +28,15 @@ class ApiCompositionTests(unittest.TestCase):
             portrait_artifacts=artifacts,
         )
 
+    @patch("kyc_api.composition.OpenCVHaarFaceDetector")
     @patch("kyc_api.composition.MiniFASNetAntiSpoofDetector")
-    def test_liveness_composition_constructs_one_detector_for_the_evaluator(self, detector_class) -> None:
+    def test_liveness_composition_constructs_detectors_for_passive_and_face_selection(
+        self, detector_class, face_detector_class
+    ) -> None:
         detector = object()
+        face_detector = object()
         detector_class.return_value = detector
+        face_detector_class.return_value = face_detector
         configured = settings(
             liveness_enabled=True,
             liveness_model_root=Path("private-models/liveness/minifasnet"),
@@ -44,7 +49,9 @@ class ApiCompositionTests(unittest.TestCase):
         assert evaluator is not None
         self.assertEqual(4, evaluator.frame_count)
         self.assertIs(detector, evaluator._detector)
+        self.assertIs(face_detector, evaluator._face_detector)
         detector_class.assert_called_once_with(configured.liveness_model_root)
+        face_detector_class.assert_called_once_with()
 
     def test_enabled_liveness_missing_models_fails_during_composition(self) -> None:
         configured = settings(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -15,7 +16,7 @@ from kyc_engine.minifasnet import (
     discover_models,
     parse_model_filename,
 )
-from kyc_engine.minifasnet.preprocessing import _scaled_box, crop_frame, tensor_values, validate_frame
+from kyc_engine.minifasnet.preprocessing import CaffeFaceRegionDetector, _scaled_box, crop_frame, tensor_values, validate_frame
 
 
 class _FaceDetector:
@@ -87,6 +88,19 @@ class MiniFASNetPreprocessingTests(unittest.TestCase):
                 validate_frame(invalid)
         with self.assertRaises(MiniFASNetNoFaceError):
             crop_frame(self.frame, (1, 1, 0, 3), scale=2.0, output_width=80, output_height=80)
+
+    def test_low_confidence_retinaface_candidate_is_not_a_frame_evaluation(self) -> None:
+        class FakeNet:
+            def setInput(self, blob, name):
+                return None
+
+            def forward(self, name):
+                return np.array([[[[0.0, 1.0, 0.59, 0.1, 0.1, 0.9, 0.9]]]], dtype=np.float32)
+
+        with patch("kyc_engine.minifasnet.preprocessing.cv2.dnn.readNetFromCaffe", return_value=FakeNet()):
+            detector = CaffeFaceRegionDetector("deploy.prototxt", "weights.caffemodel")
+            with self.assertRaises(MiniFASNetNoFaceError):
+                detector.detect(np.zeros((100, 100, 3), dtype=np.uint8))
 
 
 class MiniFASNetAdapterTests(unittest.TestCase):

@@ -15,6 +15,7 @@ from .errors import MiniFASNetInitializationError, MiniFASNetInputError, MiniFAS
 
 
 FaceBox = tuple[int, int, int, int]
+_MIN_FACE_CONFIDENCE = 0.6
 
 
 def validate_frame(frame: np.ndarray) -> np.ndarray:
@@ -58,6 +59,10 @@ class CaffeFaceRegionDetector:
             raise MiniFASNetNoFaceError("MiniFASNet found no usable face region")
         detections = detections.reshape(-1, 7)
         row = detections[int(np.argmax(detections[:, 2]))]
+        # Upstream declares this threshold on ``Detection`` but does not apply
+        # it.  The adapter must not report an anti-spoof result without a face.
+        if not math.isfinite(float(row[2])) or float(row[2]) < _MIN_FACE_CONFIDENCE:
+            raise MiniFASNetNoFaceError("MiniFASNet found no usable face region")
         left, top, right, bottom = row[3] * width, row[4] * height, row[5] * width, row[6] * height
         box = (int(left), int(top), int(right - left + 1), int(bottom - top + 1))
         if box[2] <= 0 or box[3] <= 0:

@@ -137,4 +137,5 @@ Only synthetic or irreversibly redacted identity-document fixtures may enter Git
 - [Testing strategy](docs/testing-strategy.md)
 - [Private PaddleOCR calibration](docs/ocr-calibration.md)
 - [ONNX detector contract](docs/onnx-detector-contract.md)
+- [Optional MiniFASNet passive liveness adapter](docs/minifasnet.md)
 - [Architecture decisions](docs/decisions/README.md)

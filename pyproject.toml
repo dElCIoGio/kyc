@@ -22,6 +22,7 @@ ocr = [
     "paddlepaddle>=3.2,<4",
 ]
 detection = ["onnxruntime>=1.20,<2"]
+liveness = ["torch>=2.4,<3"]
 dev = []
 
 [tool.setuptools.packages.find]

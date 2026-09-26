@@ -32,6 +32,13 @@ from .contracts import (
 )
 from .capture import CaptureAssessmentConfig, CaptureAssessmentInputError, DocumentCaptureAssessor
 from .liveness import LivenessEvaluationConfig, LivenessEvaluator
+from .minifasnet import (
+    MiniFASNetAntiSpoofDetector,
+    MiniFASNetError,
+    MiniFASNetInitializationError,
+    MiniFASNetInputError,
+    MiniFASNetNoFaceError,
+)
 from .intake import IntakeLimits
 from .pipeline import KycPipeline
 from .coordinator import DocumentCoordinator, DocumentExtractionResult
@@ -63,6 +70,11 @@ __all__ = [
     "LivenessEvaluationConfig",
     "LivenessEvaluator",
     "LivenessResult",
+    "MiniFASNetAntiSpoofDetector",
+    "MiniFASNetError",
+    "MiniFASNetInitializationError",
+    "MiniFASNetInputError",
+    "MiniFASNetNoFaceError",
     "build_paddle_document_coordinator",
     "DocumentCoordinator",
     "DocumentCaptureAssessor",

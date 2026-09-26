@@ -26,19 +26,33 @@ class WebhookEvent:
     session_id: str
     job_id: str | None
     sequence: int
-    status: str
+    verification_status: str
+    document_status: str
+    liveness_status: str
+    face_match_status: str
+    front_capture: str
+    back_capture: str
     result_available: bool
+    transition_reason: str
     occurred_at: str
 
     @classmethod
-    def from_snapshot(cls, snapshot: SessionSnapshot) -> "WebhookEvent":
+    def from_snapshot(
+        cls, snapshot: SessionSnapshot, *, transition_reason: str = "session.updated"
+    ) -> "WebhookEvent":
         return cls(
             event_id=uuid4().hex,
             session_id=snapshot.session_id,
-            job_id=snapshot.job_id,
+            job_id=snapshot.document.job_id,
             sequence=snapshot.event_sequence,
-            status=snapshot.status.value,
-            result_available=snapshot.result_available,
+            verification_status=snapshot.verification_status.value,
+            document_status=snapshot.document.status.value,
+            liveness_status=snapshot.liveness_status.value,
+            face_match_status=snapshot.face_match_status.value,
+            front_capture=snapshot.document.front_capture.value,
+            back_capture=snapshot.document.back_capture.value,
+            result_available=snapshot.document.result_available,
+            transition_reason=transition_reason,
             occurred_at=datetime.now(UTC).isoformat(),
         )
 
@@ -53,8 +67,14 @@ class WebhookEvent:
                     "session_id": self.session_id,
                     "job_id": self.job_id,
                     "sequence": self.sequence,
-                    "status": self.status,
+                    "verification_status": self.verification_status,
+                    "document_status": self.document_status,
+                    "liveness_status": self.liveness_status,
+                    "face_match_status": self.face_match_status,
+                    "front_capture": self.front_capture,
+                    "back_capture": self.back_capture,
                     "result_available": self.result_available,
+                    "transition_reason": self.transition_reason,
                 },
             },
             separators=(",", ":"),
@@ -171,8 +191,10 @@ class WebhookDispatcher:
     def start(self) -> None:
         self._thread.start()
 
-    def enqueue(self, snapshot: SessionSnapshot) -> None:
-        self._outbox.enqueue(WebhookEvent.from_snapshot(snapshot))
+    def enqueue(self, snapshot: SessionSnapshot, transition_reason: str = "session.updated") -> None:
+        self._outbox.enqueue(
+            WebhookEvent.from_snapshot(snapshot, transition_reason=transition_reason)
+        )
         self._wake.set()
 
     def shutdown(self) -> None:

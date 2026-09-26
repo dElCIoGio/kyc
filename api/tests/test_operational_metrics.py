@@ -19,7 +19,7 @@ from kyc_engine.instrumentation import (
     pipeline_metrics_context,
 )
 
-from helpers import FakeCoordinator, PNG_BYTES
+from helpers import FakeCoordinator, PNG_BYTES, accept_document
 
 
 class _ImmediateTimer:
@@ -160,7 +160,7 @@ class OperationalMetricsTests(unittest.TestCase):
     def _run_job(self, coordinator, *, timer_factory=None) -> None:
         store = SessionStore(ttl_seconds=60, max_sessions=2)
         session_id = store.create().session_id
-        store.upload(session_id, DocumentSide.FRONT, PNG_BYTES)
+        accept_document(store, session_id)
         manager = JobManager(
             coordinator,
             store,
@@ -171,7 +171,7 @@ class OperationalMetricsTests(unittest.TestCase):
             timer_factory=timer_factory or Timer,
         )
         try:
-            manager.submit(session_id)
+            manager.submit_document_processing(session_id)
             self._wait_for_terminal(store, session_id)
         finally:
             manager.shutdown()
@@ -179,7 +179,7 @@ class OperationalMetricsTests(unittest.TestCase):
     def _wait_for_terminal(self, store: SessionStore, session_id: str) -> None:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if store.get(session_id).status.value in {"success", "partial", "failed"}:
+            if store.get(session_id).document.status.value in {"passed", "partial", "failed"}:
                 return
             time.sleep(0.01)
         self.fail("job did not reach a terminal state")

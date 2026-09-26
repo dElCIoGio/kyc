@@ -32,6 +32,10 @@ KYC_OCR_DEVICE=cpu
 KYC_LOG_LEVEL=INFO
 KYC_ENVIRONMENT=development
 KYC_MAX_UPLOAD_BYTES=15728640
+KYC_CAPTURE_MIN_SHARPNESS=25.0
+KYC_CAPTURE_MIN_BRIGHTNESS=35.0
+KYC_CAPTURE_MAX_BRIGHTNESS=220.0
+KYC_CAPTURE_MIN_CONTRAST=12.0
 KYC_SESSION_TTL_SECONDS=1800
 KYC_MAX_SESSIONS=100
 KYC_JOB_WORKERS=1
@@ -160,7 +164,7 @@ or serialized results. Unexpected failures record the exception type and safe
 stack frames internally, but not exception-message text; API responses retain
 their existing generic error codes and messages.
 
-## Session Workflow
+## Verification Workflow
 
 All `/v1/*` calls require the `X-API-Key` header. `/healthz` is public and never
 returns document data.
@@ -172,7 +176,11 @@ curl.exe -X POST http://127.0.0.1:8000/v1/sessions `
   -H "X-API-Key: $env:KYC_API_KEY"
 ```
 
-Upload each available side using the returned session ID:
+Each session is one verification. It begins with document capture awaiting both
+sides, liveness blocked, and face matching blocked. Upload the front and back
+images using the returned ID. Every upload is assessed before it is retained;
+an ordinary quality rejection returns `200` with `accepted: false` and safe
+issue codes, so the caller can retry without changing stored captures.
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/images/front `
@@ -184,18 +192,21 @@ curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/images/back `
   -F "image=@private-data/ao-id-back/back.jpeg;type=image/jpeg"
 ```
 
-Queue extraction and poll status:
+When both captures are accepted, the document job is queued automatically and
+liveness becomes `ready`. Poll the verification state:
 
 ```powershell
-curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/process `
-  -H "X-API-Key: $env:KYC_API_KEY"
-
 curl.exe http://127.0.0.1:8000/v1/sessions/SESSION_ID `
   -H "X-API-Key: $env:KYC_API_KEY"
 ```
 
-Retrieve the structured result after the state becomes `success`, `partial`, or
-`failed`:
+`POST /v1/sessions/SESSION_ID/process` remains available as a safe retry if a
+completed capture is left `ready` because bounded job capacity was unavailable.
+It returns the existing queued or processing job rather than creating a second
+one.
+
+Retrieve the structured result after `document.status` becomes `passed`,
+`partial`, or `failed`:
 
 ```powershell
 curl.exe http://127.0.0.1:8000/v1/sessions/SESSION_ID/result `

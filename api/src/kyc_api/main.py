@@ -11,11 +11,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.formparsers import MultiPartParser
 
-from kyc_engine import DocumentCoordinator
+from kyc_engine import CaptureAssessmentInputError, DocumentCaptureAssessor, DocumentCoordinator
 
 from . import __version__
 from .auth import require_api_key
-from .composition import create_coordinator
+from .composition import create_capture_assessor, create_coordinator
 from .jobs import JobCapacityExceeded, JobManager
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
@@ -28,14 +28,17 @@ from .telemetry import (
     flush_tracing,
 )
 from .models import (
+    CaptureIssueResponse,
+    CaptureResponse,
     DeleteResponse,
+    DocumentStateResponse,
     DocumentSide,
     ErrorResponse,
     HealthResponse,
     JobStatusResponse,
     MetricsResponse,
     SessionResponse,
-    UploadResponse,
+    SubsystemStateResponse,
 )
 from .rate_limit import ApiKeyRateLimiter
 from .sessions import (
@@ -47,6 +50,7 @@ from .sessions import (
     SessionStoreError,
 )
 from .settings import ApiSettings
+from .verification import VerificationManager
 from .webhooks import WebhookDispatcher, WebhookOutbox
 
 
@@ -59,6 +63,7 @@ def create_app(
     *,
     settings: ApiSettings | None = None,
     coordinator: DocumentCoordinator | None = None,
+    capture_assessor: DocumentCaptureAssessor | None = None,
     session_store: SessionStore | None = None,
     executor: Executor | None = None,
     metrics: MetricsRegistry | None = None,
@@ -89,6 +94,9 @@ def create_app(
                 max_sessions=resolved_settings.max_sessions,
             )
             resolved_coordinator = coordinator or create_coordinator(resolved_settings)
+            resolved_capture_assessor = capture_assessor or create_capture_assessor(
+                resolved_settings
+            )
             resolved_metrics = metrics or MetricsRegistry()
             resolved_rate_limiter = rate_limiter or ApiKeyRateLimiter(
                 max_requests=resolved_settings.rate_limit_requests,
@@ -118,6 +126,14 @@ def create_app(
                 executor=executor,
                 webhook_publisher=resolved_dispatcher.enqueue if resolved_dispatcher is not None else None,
             )
+            verification_manager = VerificationManager(
+                assessor=resolved_capture_assessor,
+                store=resolved_store,
+                jobs=manager,
+                snapshot_publisher=(
+                    resolved_dispatcher.enqueue if resolved_dispatcher is not None else None
+                ),
+            )
             if telemetry_export is not None:
                 logger.info(
                     "OTLP telemetry export configured",
@@ -143,6 +159,7 @@ def create_app(
         application.state.settings = resolved_settings
         application.state.sessions = resolved_store
         application.state.jobs = manager
+        application.state.verifications = verification_manager
         application.state.metrics = resolved_metrics
         application.state.rate_limiter = resolved_rate_limiter
         application.state.webhook_dispatcher = resolved_dispatcher
@@ -215,7 +232,7 @@ def create_app(
 
     @application.post(
         "/v1/sessions/{session_id}/images/{side}",
-        response_model=UploadResponse,
+        response_model=CaptureResponse,
         dependencies=[Depends(require_api_key)],
         responses={
             401: {"model": ErrorResponse},
@@ -230,7 +247,7 @@ def create_app(
         side: DocumentSide,
         request: Request,
         image: UploadFile = File(...),
-    ) -> UploadResponse:
+    ) -> CaptureResponse:
         with _session_logging_context(request, session_id):
             _validate_upload_metadata(image)
             limit = request.app.state.settings.max_upload_bytes
@@ -243,14 +260,22 @@ def create_app(
             if not content or not _has_supported_signature(content, image.content_type):
                 raise _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
 
-            snapshot = request.app.state.sessions.upload(session_id, side, content)
-            return UploadResponse(
-                session_id=snapshot.session_id,
-                status=snapshot.status,
+            try:
+                submission = request.app.state.verifications.submit_document_capture(
+                    session_id, side, content
+                )
+            except CaptureAssessmentInputError as exc:
+                raise _capture_input_problem(exc.code) from exc
+            snapshot = submission.snapshot
+            return CaptureResponse(
+                session_id=session_id,
                 side=side,
-                size_bytes=len(content),
-                uploaded_sides=snapshot.uploaded_sides,
-                expires_at=snapshot.expires_at,
+                accepted=submission.assessment.accepted,
+                issues=tuple(
+                    CaptureIssueResponse(code=issue.code.value, message=issue.message)
+                    for issue in submission.assessment.issues
+                ),
+                verification=_session_response(snapshot),
             )
 
     @application.post(
@@ -267,14 +292,13 @@ def create_app(
     )
     def process_session(session_id: str, request: Request) -> JobStatusResponse:
         with _session_logging_context(request, session_id):
-            snapshot = request.app.state.jobs.submit(session_id)
-            assert snapshot.job_id is not None
-            with logging_context(job_id=snapshot.job_id):
-                logger.info("processing job queued", extra={"event": "processing_job_queued"})
+            snapshot = request.app.state.verifications.start_document_processing(session_id)
+            with logging_context(job_id=snapshot.document.job_id):
+                logger.info("document processing queued", extra={"event": "document.processing_queued"})
             return JobStatusResponse(
                 session_id=snapshot.session_id,
-                job_id=snapshot.job_id,
-                status=snapshot.status,
+                job_id=snapshot.document.job_id,
+                document_status=snapshot.document.status,
             )
 
     @application.get(
@@ -319,12 +343,19 @@ def create_app(
 def _session_response(snapshot: SessionSnapshot) -> SessionResponse:
     return SessionResponse(
         session_id=snapshot.session_id,
-        status=snapshot.status,
+        verification_status=snapshot.verification_status,
         created_at=snapshot.created_at,
         expires_at=snapshot.expires_at,
-        job_id=snapshot.job_id,
-        uploaded_sides=snapshot.uploaded_sides,
-        result_available=snapshot.result_available,
+        document=DocumentStateResponse(
+            status=snapshot.document.status,
+            front_capture=snapshot.document.front_capture,
+            back_capture=snapshot.document.back_capture,
+            job_id=snapshot.document.job_id,
+            result_available=snapshot.document.result_available,
+            error_code=snapshot.document.error_code,
+        ),
+        liveness=SubsystemStateResponse(status=snapshot.liveness_status),
+        face_match=SubsystemStateResponse(status=snapshot.face_match_status),
     )
 
 
@@ -351,6 +382,14 @@ def _problem(status_code: int, code: str, message: str) -> HTTPException:
         status_code=status_code,
         detail={"code": code, "message": message},
     )
+
+
+def _capture_input_problem(code: str) -> HTTPException:
+    if code in {"INPUT_TOO_LARGE", "IMAGE_TOO_LARGE"}:
+        return _problem(413, "IMAGE_TOO_LARGE", "Uploaded image exceeds the supported limits")
+    if code in {"DECODE_FAILED", "UNSUPPORTED_FORMAT"}:
+        return _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
+    return _problem(422, "INVALID_IMAGE", "Uploaded image is invalid")
 
 
 def _install_error_handlers(application: FastAPI) -> None:

@@ -6,6 +6,10 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 from .contracts import (
     BoundingBox,
+    CaptureAssessment,
+    CaptureIssue,
+    CaptureIssueCode,
+    CaptureMetrics,
     DetectionResult,
     DocumentProfile,
     ExtractedField,
@@ -23,6 +27,7 @@ from .contracts import (
     QrIdentityData,
     Quadrilateral,
 )
+from .capture import CaptureAssessmentConfig, CaptureAssessmentInputError, DocumentCaptureAssessor
 from .intake import IntakeLimits
 from .pipeline import KycPipeline
 from .coordinator import DocumentCoordinator, DocumentExtractionResult
@@ -33,6 +38,12 @@ from .qr import QrCodeExtractor
 
 __all__ = [
     "BoundingBox",
+    "CaptureAssessment",
+    "CaptureAssessmentConfig",
+    "CaptureAssessmentInputError",
+    "CaptureIssue",
+    "CaptureIssueCode",
+    "CaptureMetrics",
     "DetectionResult",
     "DocumentProfile",
     "ExtractedField",
@@ -45,6 +56,7 @@ __all__ = [
     "KycPipeline",
     "build_paddle_document_coordinator",
     "DocumentCoordinator",
+    "DocumentCaptureAssessor",
     "DocumentExtractionResult",
     "OCRCandidate",
     "OnnxDetectorManifest",

@@ -11,7 +11,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 from pydantic import ValidationError
 
-from helpers import FakeCoordinator, PNG_BYTES, settings
+from helpers import FakeCoordinator, PNG_BYTES, accept_document, settings
 from kyc_api.jobs import JobManager
 from kyc_api.logging import JsonFormatter
 from kyc_api.models import DocumentSide
@@ -189,7 +189,7 @@ class OtlpExportConfigurationTests(unittest.TestCase):
         )
         store = SessionStore(ttl_seconds=60, max_sessions=2)
         session_id = store.create().session_id
-        store.upload(session_id, DocumentSide.FRONT, PNG_BYTES)
+        accept_document(store, session_id)
         manager = JobManager(
             FakeCoordinator(), store, workers=1, capacity=2, timeout_seconds=1
         )
@@ -198,16 +198,16 @@ class OtlpExportConfigurationTests(unittest.TestCase):
                 "kyc_api.jobs.trace.get_tracer",
                 return_value=provider.get_tracer("test.failing_export"),
             ):
-                manager.submit(session_id)
+                manager.submit_document_processing(session_id)
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
-                    if store.get(session_id).status.value == "success":
+                    if store.get(session_id).document.status.value == "passed":
                         break
                     time.sleep(0.01)
                 else:
                     self.fail("job did not succeed")
             self.assertTrue(provider.force_flush(timeout_millis=1_000))
-            self.assertEqual("success", store.get(session_id).status.value)
+            self.assertEqual("passed", store.get(session_id).document.status.value)
         finally:
             manager.shutdown()
             provider.shutdown()

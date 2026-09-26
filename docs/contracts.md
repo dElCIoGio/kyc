@@ -34,6 +34,21 @@ and `build_balanced_pipeline()` remain advanced composition APIs.
 - `DetectionResult`: type, side, confidence, four corners, detector/version, confidence components, and orientation.
 - `NormalizedDocument`: canonical image, profile ID, dimensions, and forward/inverse 3x3 transforms.
 
+## Capture Assessment Contracts
+
+`DocumentCaptureAssessor` is the API-facing, deterministic quality gate before a
+capture becomes part of a verification session. It uses `ImageIntake` as its only
+decode and validation path, then reports immutable `CaptureAssessment` values:
+
+- `CaptureMetrics`: safe numeric width, height, sharpness, brightness, and contrast.
+- `CaptureIssue`: an ordered, PII-safe quality code and message.
+- `CaptureAssessment`: accepted flag, issues, and metrics. It never contains source
+  bytes or decoded pixels.
+
+The initial gate reports `too_blurry`, `too_dark`, `overexposed`, and
+`low_contrast`; it is intentionally not a document detector, OCR, authenticity,
+or face-quality check.
+
 ## Profile Contracts
 
 - `DocumentProfile`: profile identity, document type/side, canonical dimensions, review status, ordered fields, and an optional QR region.

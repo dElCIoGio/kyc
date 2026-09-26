@@ -5,9 +5,16 @@ from datetime import UTC, datetime, timedelta
 from threading import RLock
 from uuid import uuid4
 
-from kyc_engine import DocumentExtractionResult, ProcessingStatus
+from kyc_engine import CaptureAssessment, DocumentExtractionResult, ProcessingStatus
 
-from .models import DocumentSide, SessionStatus
+from .models import (
+    CaptureStatus,
+    DocumentSide,
+    DocumentStatus,
+    FaceMatchStatus,
+    LivenessStatus,
+    VerificationStatus,
+)
 
 
 class SessionStoreError(RuntimeError):
@@ -27,40 +34,77 @@ class SessionCapacityExceeded(SessionStoreError):
 
 
 @dataclass(frozen=True)
-class SessionSnapshot:
-    session_id: str
-    status: SessionStatus
-    created_at: datetime
-    expires_at: datetime
+class DocumentSnapshot:
+    status: DocumentStatus
+    front_capture: CaptureStatus
+    back_capture: CaptureStatus
     job_id: str | None
-    uploaded_sides: tuple[DocumentSide, ...]
     result_available: bool
     error_code: str | None
+
+
+@dataclass(frozen=True)
+class SessionSnapshot:
+    session_id: str
+    verification_status: VerificationStatus
+    created_at: datetime
+    expires_at: datetime
+    document: DocumentSnapshot
+    liveness_status: LivenessStatus
+    face_match_status: FaceMatchStatus
     event_sequence: int = 0
+
+
+@dataclass(frozen=True)
+class DocumentCaptureTransition:
+    snapshot: SessionSnapshot
+    capture_accepted: SessionSnapshot
+    capture_completed: SessionSnapshot | None
+
+
+@dataclass
+class _DocumentState:
+    status: DocumentStatus = DocumentStatus.AWAITING_CAPTURE
+    front: bytes | None = None
+    back: bytes | None = None
+    front_capture: CaptureAssessment | None = None
+    back_capture: CaptureAssessment | None = None
+    job_id: str | None = None
+    result: DocumentExtractionResult | None = None
+    error_code: str | None = None
+
+
+@dataclass
+class _LivenessState:
+    status: LivenessStatus = LivenessStatus.BLOCKED
+
+
+@dataclass
+class _FaceMatchState:
+    status: FaceMatchStatus = FaceMatchStatus.BLOCKED
 
 
 @dataclass
 class _SessionRecord:
     session_id: str
-    status: SessionStatus
+    status: VerificationStatus
     created_at: datetime
     expires_at: datetime
-    front: bytes | None = None
-    back: bytes | None = None
-    job_id: str | None = None
-    result: DocumentExtractionResult | None = None
-    error_code: str | None = None
+    document: _DocumentState
+    liveness: _LivenessState
+    face_match: _FaceMatchState
     event_sequence: int = 0
 
 
 class SessionStore:
-    """Thread-safe, memory-only storage for document extraction sessions."""
+    """Thread-safe, memory-only storage for complete verification sessions."""
 
-    _ACTIVE = {SessionStatus.QUEUED, SessionStatus.RUNNING}
-    _TERMINAL = {
-        SessionStatus.SUCCESS,
-        SessionStatus.PARTIAL,
-        SessionStatus.FAILED,
+    _DOCUMENT_PROCESSING = {DocumentStatus.QUEUED, DocumentStatus.PROCESSING}
+    _DOCUMENT_RESULTS = {DocumentStatus.PASSED, DocumentStatus.PARTIAL, DocumentStatus.FAILED}
+    _VERIFICATION_TERMINAL = {
+        VerificationStatus.VERIFIED,
+        VerificationStatus.REJECTED,
+        VerificationStatus.EXPIRED,
     }
 
     def __init__(self, *, ttl_seconds: int, max_sessions: int) -> None:
@@ -79,64 +123,98 @@ class SessionStore:
             self._purge_expired(now)
             if len(self._records) >= self._max_sessions:
                 raise SessionCapacityExceeded("Session capacity has been reached")
-            session_id = uuid4().hex
             record = _SessionRecord(
-                session_id=session_id,
-                status=SessionStatus.CREATED,
+                session_id=uuid4().hex,
+                status=VerificationStatus.IN_PROGRESS,
                 created_at=now,
                 expires_at=now + self._ttl,
+                document=_DocumentState(),
+                liveness=_LivenessState(),
+                face_match=_FaceMatchState(),
             )
-            self._records[session_id] = record
+            self._records[record.session_id] = record
             return _snapshot(record)
 
     def get(self, session_id: str) -> SessionSnapshot:
         with self._lock:
-            record = self._get_record(session_id)
-            return _snapshot(record)
+            return _snapshot(self._get_record(session_id))
 
-    def upload(
+    def accept_document_capture(
         self,
         session_id: str,
         side: DocumentSide,
         content: bytes,
-    ) -> SessionSnapshot:
+        assessment: CaptureAssessment,
+    ) -> DocumentCaptureTransition:
+        if not assessment.accepted:
+            raise ValueError("Only accepted captures can be stored")
         with self._lock:
             record = self._get_record(session_id)
-            if record.status not in {SessionStatus.CREATED, SessionStatus.UPLOADING}:
-                raise SessionConflict("Images cannot be changed after processing starts")
+            document = record.document
+            if record.status != VerificationStatus.IN_PROGRESS:
+                raise SessionConflict("Captures cannot be changed after verification ends")
+            if document.status != DocumentStatus.AWAITING_CAPTURE:
+                raise SessionConflict("Captures cannot be changed after capture completion")
             if side == DocumentSide.FRONT:
-                record.front = bytes(content)
+                document.front = bytes(content)
+                document.front_capture = assessment
             else:
-                record.back = bytes(content)
-            record.status = SessionStatus.UPLOADING
+                document.back = bytes(content)
+                document.back_capture = assessment
+            document.error_code = None
             self._refresh_expiry(record)
-            return _snapshot(record)
+            record.event_sequence += 1
+            accepted = _snapshot(record)
 
-    def queue(self, session_id: str) -> SessionSnapshot:
+            completed: SessionSnapshot | None = None
+            if document.front is not None and document.back is not None:
+                document.status = DocumentStatus.READY
+                record.liveness.status = LivenessStatus.READY
+                record.event_sequence += 1
+                completed = _snapshot(record)
+            return DocumentCaptureTransition(
+                snapshot=completed or accepted,
+                capture_accepted=accepted,
+                capture_completed=completed,
+            )
+
+    def queue_document_processing(self, session_id: str) -> SessionSnapshot:
         with self._lock:
             record = self._get_record(session_id)
-            if record.status not in {SessionStatus.CREATED, SessionStatus.UPLOADING}:
-                raise SessionConflict("Processing has already started")
-            if record.front is None and record.back is None:
-                raise SessionConflict("At least one document side must be uploaded")
-            record.job_id = uuid4().hex
-            record.status = SessionStatus.QUEUED
-            record.error_code = None
+            document = record.document
+            if record.status != VerificationStatus.IN_PROGRESS:
+                raise SessionConflict("Verification is no longer active")
+            if document.status != DocumentStatus.READY:
+                raise SessionConflict("Document processing is not ready to queue")
+            if document.front is None or document.back is None:
+                raise SessionConflict("Both document sides must be accepted")
+            document.job_id = uuid4().hex
+            document.status = DocumentStatus.QUEUED
+            document.error_code = None
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
 
-    def start(self, session_id: str, job_id: str) -> tuple[bytes | None, bytes | None, SessionSnapshot]:
+    def start_document_processing(
+        self, session_id: str, job_id: str
+    ) -> tuple[bytes, bytes, SessionSnapshot]:
         with self._lock:
             record = self._get_record(session_id)
-            if record.status != SessionStatus.QUEUED or record.job_id != job_id:
-                raise SessionConflict("The queued job is no longer available")
-            record.status = SessionStatus.RUNNING
+            document = record.document
+            if (
+                record.status != VerificationStatus.IN_PROGRESS
+                or document.status != DocumentStatus.QUEUED
+                or document.job_id != job_id
+                or document.front is None
+                or document.back is None
+            ):
+                raise SessionConflict("The queued document job is no longer available")
+            document.status = DocumentStatus.PROCESSING
             record.event_sequence += 1
             self._refresh_expiry(record)
-            return record.front, record.back, _snapshot(record)
+            return document.front, document.back, _snapshot(record)
 
-    def complete(
+    def complete_document_processing(
         self,
         session_id: str,
         job_id: str,
@@ -144,58 +222,57 @@ class SessionStore:
     ) -> SessionSnapshot | None:
         with self._lock:
             record = self._records.get(session_id)
-            if (
-                record is None
-                or record.job_id != job_id
-                or record.status != SessionStatus.RUNNING
-            ):
+            if not self._can_finish_document_job(record, job_id):
                 return None
-            record.front = None
-            record.back = None
-            record.result = result
-            record.error_code = None
-            record.status = {
-                ProcessingStatus.SUCCESS: SessionStatus.SUCCESS,
-                ProcessingStatus.PARTIAL: SessionStatus.PARTIAL,
-                ProcessingStatus.FAILED: SessionStatus.FAILED,
+            assert record is not None
+            document = record.document
+            _clear_document_sources(document)
+            document.result = result
+            document.error_code = None
+            document.status = {
+                ProcessingStatus.SUCCESS: DocumentStatus.PASSED,
+                ProcessingStatus.PARTIAL: DocumentStatus.PARTIAL,
+                ProcessingStatus.FAILED: DocumentStatus.FAILED,
             }[result.status]
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
 
-    def fail(self, session_id: str, job_id: str, code: str) -> SessionSnapshot | None:
+    def fail_document_processing(
+        self, session_id: str, job_id: str, code: str
+    ) -> SessionSnapshot | None:
         with self._lock:
             record = self._records.get(session_id)
             if (
                 record is None
-                or record.job_id != job_id
-                or record.status not in {SessionStatus.QUEUED, SessionStatus.RUNNING}
+                or record.status != VerificationStatus.IN_PROGRESS
+                or record.document.job_id != job_id
+                or record.document.status not in self._DOCUMENT_PROCESSING
             ):
                 return None
-            record.front = None
-            record.back = None
-            record.result = None
-            record.error_code = code
-            record.status = SessionStatus.FAILED
+            document = record.document
+            _clear_document_sources(document)
+            document.result = None
+            document.error_code = code
+            document.status = DocumentStatus.FAILED
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
 
-    def timeout(self, session_id: str, job_id: str) -> SessionSnapshot | None:
+    def timeout_document_processing(
+        self, session_id: str, job_id: str
+    ) -> SessionSnapshot | None:
         """Fail an overdue running job and invalidate any later completion."""
         with self._lock:
             record = self._records.get(session_id)
-            if (
-                record is None
-                or record.job_id != job_id
-                or record.status != SessionStatus.RUNNING
-            ):
+            if not self._can_finish_document_job(record, job_id):
                 return None
-            record.front = None
-            record.back = None
-            record.result = None
-            record.error_code = "JOB_TIMEOUT"
-            record.status = SessionStatus.FAILED
+            assert record is not None
+            document = record.document
+            _clear_document_sources(document)
+            document.result = None
+            document.error_code = "JOB_TIMEOUT"
+            document.status = DocumentStatus.FAILED
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -203,11 +280,12 @@ class SessionStore:
     def result(self, session_id: str) -> DocumentExtractionResult:
         with self._lock:
             record = self._get_record(session_id)
-            if record.status not in self._TERMINAL:
-                raise SessionConflict("The extraction result is not ready")
-            if record.result is None:
-                raise SessionStoreError(record.error_code or "JOB_FAILED")
-            return record.result
+            document = record.document
+            if document.status not in self._DOCUMENT_RESULTS:
+                raise SessionConflict("The document extraction result is not ready")
+            if document.result is None:
+                raise SessionStoreError(document.error_code or "JOB_FAILED")
+            return document.result
 
     def delete(self, session_id: str) -> None:
         with self._lock:
@@ -219,10 +297,9 @@ class SessionStore:
         """Testing and diagnostics helper; never exposes image bytes."""
         with self._lock:
             record = self._records.get(session_id)
-            return bool(record and (record.front is not None or record.back is not None))
+            return bool(record and (record.document.front is not None or record.document.back is not None))
 
     def cleanup(self) -> int:
-        """Remove expired terminal sessions without exposing retained state."""
         with self._lock:
             return self._purge_expired(_now())
 
@@ -233,15 +310,24 @@ class SessionStore:
         except KeyError as exc:
             raise SessionNotFound("Session was not found") from exc
 
+    def _can_finish_document_job(self, record: _SessionRecord | None, job_id: str) -> bool:
+        return bool(
+            record is not None
+            and record.status == VerificationStatus.IN_PROGRESS
+            and record.document.job_id == job_id
+            and record.document.status == DocumentStatus.PROCESSING
+        )
+
     def _purge_expired(self, now: datetime) -> int:
         expired = [
             session_id
             for session_id, record in self._records.items()
-            if record.status not in self._ACTIVE and record.expires_at <= now
+            if record.document.status not in self._DOCUMENT_PROCESSING
+            and record.expires_at <= now
         ]
         for session_id in expired:
             record = self._records.pop(session_id)
-            record.status = SessionStatus.EXPIRED
+            record.status = VerificationStatus.EXPIRED
             _clear_sensitive_state(record)
         return len(expired)
 
@@ -250,28 +336,44 @@ class SessionStore:
 
 
 def _snapshot(record: _SessionRecord) -> SessionSnapshot:
-    sides: list[DocumentSide] = []
-    if record.front is not None:
-        sides.append(DocumentSide.FRONT)
-    if record.back is not None:
-        sides.append(DocumentSide.BACK)
+    document = record.document
     return SessionSnapshot(
         session_id=record.session_id,
-        status=record.status,
+        verification_status=record.status,
         created_at=record.created_at,
         expires_at=record.expires_at,
-        job_id=record.job_id,
-        uploaded_sides=tuple(sides),
-        result_available=record.result is not None,
-        error_code=record.error_code,
+        document=DocumentSnapshot(
+            status=document.status,
+            front_capture=(
+                CaptureStatus.ACCEPTED
+                if document.front_capture is not None
+                else CaptureStatus.MISSING
+            ),
+            back_capture=(
+                CaptureStatus.ACCEPTED
+                if document.back_capture is not None
+                else CaptureStatus.MISSING
+            ),
+            job_id=document.job_id,
+            result_available=document.result is not None,
+            error_code=document.error_code,
+        ),
+        liveness_status=record.liveness.status,
+        face_match_status=record.face_match.status,
         event_sequence=record.event_sequence,
     )
 
 
+def _clear_document_sources(document: _DocumentState) -> None:
+    document.front = None
+    document.back = None
+
+
 def _clear_sensitive_state(record: _SessionRecord) -> None:
-    record.front = None
-    record.back = None
-    record.result = None
+    _clear_document_sources(record.document)
+    record.document.front_capture = None
+    record.document.back_capture = None
+    record.document.result = None
 
 
 def _now() -> datetime:

@@ -18,7 +18,7 @@ from kyc_api.models import DocumentSide
 from kyc_api.rate_limit import ApiKeyRateLimiter
 from kyc_api.sessions import SessionStore, SessionStoreError, _now
 
-from helpers import API_KEY, AUTH_HEADERS, PNG_BYTES, FakeCoordinator, settings
+from helpers import API_KEY, AUTH_HEADERS, PNG_BYTES, FakeCoordinator, accept_document, settings
 
 
 class _ImmediateTimer:
@@ -162,8 +162,8 @@ class JobTimeoutTests(unittest.TestCase):
         store = SessionStore(ttl_seconds=60, max_sessions=2)
         first = store.create().session_id
         second = store.create().session_id
-        store.upload(first, DocumentSide.FRONT, PNG_BYTES)
-        store.upload(second, DocumentSide.FRONT, PNG_BYTES)
+        accept_document(store, first)
+        accept_document(store, second)
         coordinator = FakeCoordinator(started=started, release=release)
         metrics = MetricsRegistry()
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -177,12 +177,12 @@ class JobTimeoutTests(unittest.TestCase):
                 executor=executor,
                 timer_factory=_ImmediateTimer,
             )
-            manager.submit(first)
+            manager.submit_document_processing(first)
             self.assertTrue(started.wait(timeout=1))
-            self.assertEqual("failed", store.get(first).status.value)
+            self.assertEqual("failed", store.get(first).document.status.value)
             self.assertFalse(store.contains_images(first))
             with self.assertRaises(JobCapacityExceeded):
-                manager.submit(second)
+                manager.submit_document_processing(second)
             release.set()
         with self.assertRaises(SessionStoreError):
             store.result(first)
@@ -201,7 +201,7 @@ class JobTimeoutTests(unittest.TestCase):
         configured = settings(session_ttl_seconds=1, session_cleanup_interval_seconds=1)
         with TestClient(create_app(settings=configured, coordinator=FakeCoordinator(), session_store=store)):
             session_id = store.create().session_id
-            store.upload(session_id, DocumentSide.FRONT, PNG_BYTES)
+            accept_document(store, session_id)
             time.sleep(1.2)
             self.assertNotIn(session_id, store._records)
 

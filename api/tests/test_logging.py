@@ -15,7 +15,7 @@ from kyc_api.models import DocumentSide
 from kyc_api.sessions import SessionStore
 from kyc_engine.instrumentation import observe_pipeline_stage
 
-from helpers import AUTH_HEADERS, PNG_BYTES, extraction_result, settings
+from helpers import AUTH_HEADERS, PNG_BYTES, accept_document, extraction_result, settings
 
 
 class _SensitiveFailingCoordinator:
@@ -100,7 +100,7 @@ class StructuredLoggingTests(unittest.TestCase):
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
         handler.setFormatter(JsonFormatter(environment="test"))
-        logger = logging.getLogger("kyc_api.main")
+        logger = logging.getLogger("kyc_api.verification")
         original_handlers, original_level, original_propagate = (
             logger.handlers[:], logger.level, logger.propagate
         )
@@ -117,7 +117,11 @@ class StructuredLoggingTests(unittest.TestCase):
                     headers=AUTH_HEADERS,
                     files={"image": ("front.png", PNG_BYTES, "image/png")},
                 )
-                response = client.post(f"/v1/sessions/{session_id}/process", headers=AUTH_HEADERS)
+                response = client.post(
+                    f"/v1/sessions/{session_id}/images/back",
+                    headers=AUTH_HEADERS,
+                    files={"image": ("back.png", PNG_BYTES, "image/png")},
+                )
         finally:
             logger.handlers = original_handlers
             logger.setLevel(original_level)
@@ -126,11 +130,11 @@ class StructuredLoggingTests(unittest.TestCase):
         record = next(
             json.loads(line)
             for line in stream.getvalue().splitlines()
-            if json.loads(line)["event"] == "processing_job_queued"
+            if json.loads(line)["event"] == "document.capture_completed"
         )
         self.assertEqual(response.headers["X-Request-ID"], record["request_id"])
         self.assertEqual(session_id, record["session_id"])
-        self.assertEqual(response.json()["job_id"], record["job_id"])
+        self.assertNotIn("job_id", record)
 
     def test_worker_context_reaches_engine_and_does_not_leak_between_jobs(self) -> None:
         stream = io.StringIO()
@@ -146,8 +150,8 @@ class StructuredLoggingTests(unittest.TestCase):
         store = SessionStore(ttl_seconds=60, max_sessions=2)
         first = store.create().session_id
         second = store.create().session_id
-        store.upload(first, DocumentSide.FRONT, PNG_BYTES)
-        store.upload(second, DocumentSide.FRONT, PNG_BYTES)
+        accept_document(store, first)
+        accept_document(store, second)
         try:
             manager = JobManager(
                 _DeepLoggingCoordinator(),
@@ -155,8 +159,8 @@ class StructuredLoggingTests(unittest.TestCase):
                 workers=1,
                 capacity=2,
             )
-            first_job = manager.submit(first).job_id
-            second_job = manager.submit(second).job_id
+            first_job = manager.submit_document_processing(first).document.job_id
+            second_job = manager.submit_document_processing(second).document.job_id
             self._wait_for_success(store, first)
             self._wait_for_success(store, second)
             manager.shutdown()
@@ -192,7 +196,7 @@ class StructuredLoggingTests(unittest.TestCase):
             logger.info(
                 "this message is intentionally not serialized",
                 extra={
-                    "event": "processing_job_completed",
+                    "event": "document.passed",
                     "session_id": "session-test-1",
                     "status": "success",
                     "extracted_value": "synthetic-private-id-123456789",
@@ -204,7 +208,7 @@ class StructuredLoggingTests(unittest.TestCase):
             logger.propagate = original_propagate
 
         payload = json.loads(stream.getvalue())
-        self.assertEqual("processing_job_completed", payload["event"])
+        self.assertEqual("document.passed", payload["event"])
         self.assertEqual("kyc-api", payload["service"])
         self.assertEqual("test", payload["environment"])
         self.assertEqual("session-test-1", payload["session_id"])
@@ -263,9 +267,10 @@ class StructuredLoggingTests(unittest.TestCase):
                     headers=AUTH_HEADERS,
                     files={"image": ("private-name.png", PNG_BYTES, "image/png")},
                 )
-                self.assertEqual(
-                    202,
-                    client.post(f"/v1/sessions/{session_id}/process", headers=AUTH_HEADERS).status_code,
+                client.post(
+                    f"/v1/sessions/{session_id}/images/back",
+                    headers=AUTH_HEADERS,
+                    files={"image": ("private-name.png", PNG_BYTES, "image/png")},
                 )
                 self._wait_for_failed_job(client, session_id)
                 response = client.get(f"/v1/sessions/{session_id}/result", headers=AUTH_HEADERS)
@@ -280,7 +285,7 @@ class StructuredLoggingTests(unittest.TestCase):
         self.assertNotIn("private-name", response.text)
 
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
-        failure = next(record for record in records if record["event"] == "processing_job_failed")
+        failure = next(record for record in records if record["event"] == "document.failed")
         self.assertEqual("RuntimeError", failure["exception_type"])
         self.assertTrue(failure["traceback"])
         self.assertNotIn("synthetic-private-id-123456789", stream.getvalue())
@@ -319,7 +324,7 @@ class StructuredLoggingTests(unittest.TestCase):
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             response = client.get(f"/v1/sessions/{session_id}", headers=AUTH_HEADERS)
-            if response.json()["status"] == "failed":
+            if response.json()["document"]["status"] == "failed":
                 return
             time.sleep(0.01)
         self.fail("job did not fail")
@@ -327,7 +332,7 @@ class StructuredLoggingTests(unittest.TestCase):
     def _wait_for_success(self, store: SessionStore, session_id: str) -> None:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if store.get(session_id).status.value == "success":
+            if store.get(session_id).document.status.value == "passed":
                 return
             time.sleep(0.01)
         self.fail("job did not complete")

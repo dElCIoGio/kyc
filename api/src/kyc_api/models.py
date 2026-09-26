@@ -7,15 +7,42 @@ from typing import Mapping
 from pydantic import BaseModel, ConfigDict
 
 
-class SessionStatus(StrEnum):
-    CREATED = "created"
-    UPLOADING = "uploading"
+class VerificationStatus(StrEnum):
+    IN_PROGRESS = "in_progress"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class DocumentStatus(StrEnum):
+    AWAITING_CAPTURE = "awaiting_capture"
+    READY = "ready"
     QUEUED = "queued"
-    RUNNING = "running"
-    SUCCESS = "success"
+    PROCESSING = "processing"
+    PASSED = "passed"
     PARTIAL = "partial"
     FAILED = "failed"
-    EXPIRED = "expired"
+
+
+class LivenessStatus(StrEnum):
+    BLOCKED = "blocked"
+    READY = "ready"
+    PROCESSING = "processing"
+    PASSED = "passed"
+    FAILED = "failed"
+
+
+class FaceMatchStatus(StrEnum):
+    BLOCKED = "blocked"
+    READY = "ready"
+    PROCESSING = "processing"
+    PASSED = "passed"
+    FAILED = "failed"
+
+
+class CaptureStatus(StrEnum):
+    MISSING = "missing"
+    ACCEPTED = "accepted"
 
 
 class DocumentSide(StrEnum):
@@ -23,35 +50,60 @@ class DocumentSide(StrEnum):
     BACK = "back"
 
 
+class CaptureIssueResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    message: str
+
+
+class DocumentStateResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status: DocumentStatus
+    front_capture: CaptureStatus
+    back_capture: CaptureStatus
+    job_id: str | None = None
+    result_available: bool = False
+    error_code: str | None = None
+
+
+class SubsystemStateResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status: LivenessStatus | FaceMatchStatus
+
+
 class SessionResponse(BaseModel):
+    """Public representation of one verification session."""
+
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    status: SessionStatus
+    verification_status: VerificationStatus
     created_at: datetime
     expires_at: datetime
-    job_id: str | None = None
-    uploaded_sides: tuple[DocumentSide, ...] = ()
-    result_available: bool = False
+    document: DocumentStateResponse
+    liveness: SubsystemStateResponse
+    face_match: SubsystemStateResponse
 
 
-class UploadResponse(BaseModel):
+class CaptureResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    status: SessionStatus
     side: DocumentSide
-    size_bytes: int
-    uploaded_sides: tuple[DocumentSide, ...]
-    expires_at: datetime
+    accepted: bool
+    issues: tuple[CaptureIssueResponse, ...] = ()
+    verification: SessionResponse
 
 
 class JobStatusResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    job_id: str
-    status: SessionStatus
+    job_id: str | None = None
+    document_status: DocumentStatus
 
 
 class DeleteResponse(BaseModel):

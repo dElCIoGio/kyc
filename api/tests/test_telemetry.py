@@ -21,7 +21,7 @@ from kyc_engine.contracts import KycExtractionResult, ProcessingStatus
 from kyc_engine.coordinator import DocumentCoordinator
 from kyc_engine.instrumentation import observe_pipeline_stage
 
-from helpers import PNG_BYTES
+from helpers import PNG_BYTES, accept_document
 
 
 class _ObservedPipeline:
@@ -68,8 +68,7 @@ class TelemetryTests(unittest.TestCase):
     def test_job_side_and_stage_spans_form_one_hierarchy(self) -> None:
         store = SessionStore(ttl_seconds=60, max_sessions=2)
         session_id = store.create().session_id
-        store.upload(session_id, DocumentSide.FRONT, PNG_BYTES)
-        store.upload(session_id, DocumentSide.BACK, PNG_BYTES)
+        accept_document(store, session_id)
         manager = JobManager(
             DocumentCoordinator(_ObservedPipeline("front"), _ObservedPipeline("back")),
             store,
@@ -77,7 +76,7 @@ class TelemetryTests(unittest.TestCase):
             capacity=2,
         )
         try:
-            job_id = manager.submit(session_id).job_id
+            job_id = manager.submit_document_processing(session_id).document.job_id
             self._wait_for_success(store, session_id)
         finally:
             manager.shutdown()
@@ -169,10 +168,8 @@ class TelemetryTests(unittest.TestCase):
         store = SessionStore(ttl_seconds=60, max_sessions=3)
         first_session = store.create().session_id
         second_session = store.create().session_id
-        store.upload(first_session, DocumentSide.FRONT, PNG_BYTES)
-        store.upload(first_session, DocumentSide.BACK, PNG_BYTES)
-        store.upload(second_session, DocumentSide.FRONT, PNG_BYTES)
-        store.upload(second_session, DocumentSide.BACK, PNG_BYTES)
+        accept_document(store, first_session)
+        accept_document(store, second_session)
         manager = JobManager(
             DocumentCoordinator(_ObservedPipeline("front"), _ObservedPipeline("back")),
             store,
@@ -180,8 +177,8 @@ class TelemetryTests(unittest.TestCase):
             capacity=3,
         )
         try:
-            manager.submit(first_session)
-            manager.submit(second_session)
+            manager.submit_document_processing(first_session)
+            manager.submit_document_processing(second_session)
             self._wait_for_success(store, first_session)
             self._wait_for_success(store, second_session)
         finally:
@@ -194,7 +191,7 @@ class TelemetryTests(unittest.TestCase):
     def _wait_for_success(self, store: SessionStore, session_id: str) -> None:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if store.get(session_id).status.value == "success":
+            if store.get(session_id).document.status.value == "passed":
                 return
             time.sleep(0.01)
         self.fail("job did not complete")

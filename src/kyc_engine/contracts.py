@@ -30,6 +30,13 @@ class ProcessingStatus(str, Enum):
     FAILED = "failed"
 
 
+class CaptureIssueCode(str, Enum):
+    TOO_BLURRY = "too_blurry"
+    TOO_DARK = "too_dark"
+    OVEREXPOSED = "overexposed"
+    LOW_CONTRAST = "low_contrast"
+
+
 class IssueSeverity(str, Enum):
     WARNING = "warning"
     ERROR = "error"
@@ -111,6 +118,33 @@ class InputImage:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "image", readonly_image(self.image))
+
+
+@dataclass(frozen=True)
+class CaptureIssue:
+    code: CaptureIssueCode
+    message: str
+
+
+@dataclass(frozen=True)
+class CaptureMetrics:
+    width: int
+    height: int
+    sharpness: float
+    brightness: float
+    contrast: float
+
+
+@dataclass(frozen=True)
+class CaptureAssessment:
+    """Non-sensitive quality decision for one encoded document capture."""
+
+    accepted: bool
+    issues: tuple[CaptureIssue, ...]
+    metrics: CaptureMetrics
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "issues", tuple(self.issues))
 
 
 @dataclass(frozen=True)

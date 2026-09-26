@@ -21,6 +21,10 @@ class ApiSettings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
     max_upload_bytes: int = Field(default=15 * 1024 * 1024, gt=0)
+    capture_min_sharpness: float = Field(default=25.0, ge=0)
+    capture_min_brightness: float = Field(default=35.0, ge=0, le=255)
+    capture_max_brightness: float = Field(default=220.0, ge=0, le=255)
+    capture_min_contrast: float = Field(default=12.0, ge=0)
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
     max_sessions: int = Field(default=100, gt=0)
     job_workers: int = Field(default=1, gt=0)
@@ -62,6 +66,12 @@ class ApiSettings(BaseSettings):
             raise ValueError(
                 "KYC_OTEL_ENDPOINT must be a base endpoint, not a signal-specific OTLP URL"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_capture_assessment_configuration(self) -> "ApiSettings":
+        if self.capture_min_brightness >= self.capture_max_brightness:
+            raise ValueError("KYC_CAPTURE_MIN_BRIGHTNESS must be lower than KYC_CAPTURE_MAX_BRIGHTNESS")
         return self
 
     @model_validator(mode="after")

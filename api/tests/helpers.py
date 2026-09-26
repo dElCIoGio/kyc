@@ -1,16 +1,39 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from threading import Event
 
-from kyc_engine import DocumentExtractionResult, KycExtractionResult, ProcessingStatus
+from PIL import Image, ImageDraw
+
+from kyc_engine import (
+    CaptureAssessment,
+    CaptureMetrics,
+    DocumentExtractionResult,
+    KycExtractionResult,
+    ProcessingStatus,
+)
+from kyc_api.models import DocumentSide
 
 from kyc_api.settings import ApiSettings
 
 
 API_KEY = "test-api-key-123456789"
 AUTH_HEADERS = {"X-API-Key": API_KEY}
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"synthetic-image-bytes"
+
+def _synthetic_png() -> bytes:
+    image = Image.new("L", (320, 240), 128)
+    draw = ImageDraw.Draw(image)
+    for x in range(0, 320, 16):
+        draw.line((x, 0, x, 239), fill=30 if (x // 16) % 2 else 225, width=3)
+    for y in range(0, 240, 16):
+        draw.line((0, y, 319, y), fill=225 if (y // 16) % 2 else 30, width=2)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+PNG_BYTES = _synthetic_png()
 
 
 def settings(**overrides) -> ApiSettings:
@@ -85,3 +108,17 @@ class FakeCoordinator:
         if self.fail:
             raise RuntimeError("sensitive backend failure")
         return self.output
+
+
+def accepted_capture_assessment() -> CaptureAssessment:
+    return CaptureAssessment(
+        accepted=True,
+        issues=(),
+        metrics=CaptureMetrics(width=320, height=240, sharpness=100.0, brightness=128.0, contrast=50.0),
+    )
+
+
+def accept_document(store, session_id: str, *, front: bytes = PNG_BYTES, back: bytes = PNG_BYTES) -> None:
+    assessment = accepted_capture_assessment()
+    store.accept_document_capture(session_id, DocumentSide.FRONT, front, assessment)
+    store.accept_document_capture(session_id, DocumentSide.BACK, back, assessment)

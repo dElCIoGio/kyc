@@ -31,6 +31,12 @@ class ProfileTests(unittest.TestCase):
         father_name = next(field for field in profile.fields if field.name == "father_name")
         self.assertEqual(BoundingBox(34, 262, 300, 52), father_name.bounding_box)
         self.assertEqual(0, father_name.padding)
+        self.assertEqual((475, 120, 225, 245), (
+            profile.portrait.x,
+            profile.portrait.y,
+            profile.portrait.width,
+            profile.portrait.height,
+        ) if profile.portrait else None)
 
     def test_rejects_duplicate_fields(self) -> None:
         field = FieldDefinition("name", BoundingBox(0, 0, 10, 10))
@@ -62,6 +68,7 @@ class ProfileTests(unittest.TestCase):
         self.assertLessEqual(date_of_birth.bounding_box.right, profile.canonical_width)
         self.assertLessEqual(date_of_birth.bounding_box.bottom, profile.canonical_height)
         self.assertIsNotNone(profile.qr_code)
+        self.assertIsNone(profile.portrait)
         assert profile.qr_code is not None
         self.assertLessEqual(profile.qr_code.bounding_box.right, profile.canonical_width)
         self.assertLessEqual(profile.qr_code.bounding_box.bottom, profile.canonical_height)

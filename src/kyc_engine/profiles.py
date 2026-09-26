@@ -5,7 +5,13 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
 
-from .contracts import BoundingBox, DocumentProfile, FieldDefinition, QrCodeDefinition
+from .contracts import (
+    BoundingBox,
+    DocumentProfile,
+    FieldDefinition,
+    PortraitDefinition,
+    QrCodeDefinition,
+)
 
 SUPPORTED_OCR_MODES = {"single_line", "multiline"}
 SUPPORTED_COMPARISONS = {"casefold_whitespace", "alphanumeric_upper", "date"}
@@ -98,6 +104,7 @@ def profile_from_mapping(raw: object) -> DocumentProfile:
         review_status=_required_str(raw, "review_status"),
         fields=fields,
         qr_code=_qr_code_from_mapping(raw.get("qr_code")),
+        portrait=_portrait_from_mapping(raw.get("portrait")),
     )
     validate_profile(profile)
     return profile
@@ -118,6 +125,12 @@ def validate_profile(profile: DocumentProfile) -> None:
             raise ValueError("QR code lies outside canonical dimensions")
         if profile.qr_code.padding < 0:
             raise ValueError("QR code padding cannot be negative")
+    if profile.portrait is not None:
+        portrait = profile.portrait
+        if portrait.x < 0 or portrait.y < 0:
+            raise ValueError("Portrait lies outside canonical dimensions")
+        if portrait.right > profile.canonical_width or portrait.bottom > profile.canonical_height:
+            raise ValueError("Portrait lies outside canonical dimensions")
 
     names: set[str] = set()
     for item in profile.fields:
@@ -175,6 +188,19 @@ def _qr_code_from_mapping(raw: object) -> QrCodeDefinition | None:
             height=_required_int(raw, "height"),
         ),
         padding=_optional_int(raw, "padding", 0),
+    )
+
+
+def _portrait_from_mapping(raw: object) -> PortraitDefinition | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise TypeError("Portrait definition must be a mapping")
+    return PortraitDefinition(
+        x=_required_int(raw, "x"),
+        y=_required_int(raw, "y"),
+        width=_required_int(raw, "width"),
+        height=_required_int(raw, "height"),
     )
 
 

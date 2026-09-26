@@ -14,16 +14,22 @@ from kyc_engine import (
     build_paddle_document_coordinator,
 )
 from kyc_engine.intake import ImageIntake
+from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 from .settings import ApiSettings
 
 
-def create_coordinator(settings: ApiSettings) -> DocumentCoordinator:
+def create_coordinator(
+    settings: ApiSettings,
+    *,
+    portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
+) -> DocumentCoordinator:
     with _suppress_backend_output():
         return build_paddle_document_coordinator(
             model_manifest=settings.ocr_model_manifest,
             device=settings.ocr_device,
             intake_limits=IntakeLimits(max_encoded_bytes=settings.max_upload_bytes),
+            portrait_artifacts=portrait_artifacts,
         )
 
 

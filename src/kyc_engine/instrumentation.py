@@ -99,7 +99,7 @@ def observe_pipeline_stage(
     stage: str,
     *,
     error_code: str | None = None,
-) -> Iterator[None]:
+) -> Iterator[Span]:
     """Log one meaningful pipeline operation without changing its behavior."""
     side = _side.get()
     started = perf_counter()
@@ -117,7 +117,7 @@ def observe_pipeline_stage(
     ) as span:
         _logger.info("pipeline stage started", extra=metadata)
         try:
-            yield
+            yield span
         except Exception as exc:
             mark_span_failed(span, exc)
             duration_seconds = perf_counter() - started

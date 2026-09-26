@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -23,6 +24,20 @@ from helpers import (
     accept_document,
     settings,
 )
+
+
+class _ImmediateTimer:
+    """Timer double that deterministically makes timeout win before processing."""
+
+    def __init__(self, _delay: float, callback) -> None:
+        self.daemon = False
+        self._callback = callback
+
+    def start(self) -> None:
+        self._callback()
+
+    def cancel(self) -> None:
+        pass
 
 
 class ApiLivenessTests(unittest.TestCase):
@@ -75,6 +90,30 @@ class ApiLivenessTests(unittest.TestCase):
         self.assertNotIn("tensor", payload["liveness"])
         self.assertEqual(1, self.evaluator.calls)
         self.assertEqual(3, len(self.evaluator.frames or ()))
+
+    def test_document_timeout_leaves_liveness_ready_for_successful_submission(self) -> None:
+        self.client.app.state.jobs._timer_factory = _ImmediateTimer
+        session_id = self._ready_session()
+
+        deadline = time.monotonic() + 3
+        current = None
+        while time.monotonic() < deadline:
+            current = self.client.get(f"/v1/sessions/{session_id}", headers=AUTH_HEADERS).json()
+            if current["document"]["status"] == "failed":
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("document processing did not time out")
+
+        assert current is not None
+        self.assertEqual("JOB_TIMEOUT", current["document"]["error_code"])
+        self.assertEqual("ready", current["liveness"]["status"])
+        self.assertEqual("blocked", current["face_match"]["status"])
+
+        response = self._submit(session_id)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("passed", response.json()["liveness"]["status"])
+        self.assertEqual(1, self.evaluator.calls)
 
     def test_failed_decision_is_a_safe_successful_liveness_interaction(self) -> None:
         self.context.__exit__(None, None, None)

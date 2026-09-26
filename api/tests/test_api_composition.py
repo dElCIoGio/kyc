@@ -4,6 +4,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from kyc_engine import IntakeLimits, MiniFASNetInitializationError
+from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 from kyc_api.composition import create_coordinator, create_liveness_evaluator
 
 from helpers import FakeCoordinator, settings
@@ -16,13 +17,15 @@ class ApiCompositionTests(unittest.TestCase):
         configured = settings()
         build_coordinator.return_value = expected
 
-        coordinator = create_coordinator(configured)
+        artifacts = InMemoryPortraitArtifactStore()
+        coordinator = create_coordinator(configured, portrait_artifacts=artifacts)
 
         self.assertIs(expected, coordinator)
         build_coordinator.assert_called_once_with(
             model_manifest=configured.ocr_model_manifest,
             device=configured.ocr_device,
             intake_limits=IntakeLimits(max_encoded_bytes=configured.max_upload_bytes),
+            portrait_artifacts=artifacts,
         )
 
     @patch("kyc_api.composition.MiniFASNetAntiSpoofDetector")

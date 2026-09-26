@@ -6,6 +6,9 @@ import numpy as np
 
 from kyc_engine.contracts import (
     DetectionResult,
+    BoundingBox,
+    FaceCandidate,
+    FaceDetectionResult,
     FieldCrop,
     OCRCandidate,
     Point,
@@ -16,6 +19,8 @@ from kyc_engine.contracts import (
 from kyc_engine.defaults import build_balanced_pipeline
 from kyc_engine.detection import DetectionError
 from kyc_engine.profiles import load_default_profiles
+from kyc_engine.portrait import PortraitExtractor
+from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 
 class FullImageDetector:
@@ -119,6 +124,11 @@ class FakeBackRecognizer(FakeRecognizer):
         )
 
 
+class FakePortraitDetector:
+    def detect(self, _image: np.ndarray) -> FaceDetectionResult:
+        return FaceDetectionResult((FaceCandidate(BoundingBox(30, 25, 100, 120)),))
+
+
 def synthetic_card() -> np.ndarray:
     image = np.full((467, 718, 3), 220, dtype=np.uint8)
     cv2.rectangle(image, (5, 202), (420, 245), (30, 30, 30), 2)
@@ -166,6 +176,23 @@ class CorePipelineTests(unittest.TestCase):
         self.assertEqual(ProcessingStatus.PARTIAL, result.status)
         self.assertEqual("missing", result.fields["id_number"].status.value)
         self.assertTrue(any(issue.code == "FIELD_MISSING" for issue in result.issues))
+
+    def test_front_portrait_is_internal_but_safe_status_is_serialized(self) -> None:
+        artifacts = InMemoryPortraitArtifactStore()
+        pipeline = build_balanced_pipeline(
+            FakeRecognizer(),
+            detector=FullImageDetector(),
+            portrait_extractor=PortraitExtractor(FakePortraitDetector(), artifacts),
+        )
+        result = pipeline.process(synthetic_card())
+        assert result.portrait is not None
+        self.assertTrue(result.portrait.eligible_for_face_match)
+        self.assertIsNotNone(result.portrait.artifact_id)
+        payload = result.to_dict()
+        self.assertEqual({"status": "available", "face_detected": True}, payload["portrait"])
+        self.assertNotIn("artifact_id", str(payload))
+        self.assertNotIn("bounding_box", str(payload["portrait"]))
+        artifacts.release_pending((result.portrait.artifact_id,))
 
     def test_back_qr_is_structured_without_changing_text_fields(self) -> None:
         pipeline = build_balanced_pipeline(FakeBackRecognizer(), detector=BackImageDetector())

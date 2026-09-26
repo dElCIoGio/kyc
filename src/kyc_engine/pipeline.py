@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from time import perf_counter
 from typing import Callable
 from uuid import uuid4
@@ -10,6 +11,7 @@ from .contracts import (
     KycExtractionResult,
     PipelineIssue,
     ProcessingStatus,
+    PortraitExtractionResult,
     QrCodeResult,
     QrCodeStatus,
 )
@@ -20,10 +22,14 @@ from .instrumentation import observe_pipeline_stage
 from .normalization import DocumentNormalizer, NormalizationError
 from .ocr import TextRecognizer
 from .profiles import ProfileRegistry
+from .portrait import PortraitExtractor
 from .quality import QualityAssessmentPipeline, StructuralQualityGate
 from .qr import QrCodeExtractor
 from .reconciliation import CandidateReconciler
 from .variants import BalancedVariantPolicy
+
+
+logger = logging.getLogger("kyc_engine.pipeline")
 
 
 class KycPipeline:
@@ -40,6 +46,7 @@ class KycPipeline:
         localizer: FieldLocalizer,
         recognizer: TextRecognizer,
         reconciler: CandidateReconciler,
+        portrait_extractor: PortraitExtractor,
         qr_extractor: QrCodeExtractor | None = None,
     ) -> None:
         self.intake = intake
@@ -52,6 +59,7 @@ class KycPipeline:
         self.localizer = localizer
         self.recognizer = recognizer
         self.reconciler = reconciler
+        self.portrait_extractor = portrait_extractor
         self.qr_extractor = qr_extractor or QrCodeExtractor()
 
     def process(self, source: ImageSource) -> KycExtractionResult:
@@ -172,6 +180,32 @@ class KycPipeline:
                 profile_id=profile.profile_id,
             )
 
+        with observe_pipeline_stage(
+            "portrait_extraction", error_code="PORTRAIT_EXTRACTION_FAILED"
+        ) as span:
+            portrait = _timed(
+                "portrait_extraction",
+                timings,
+                lambda: self.portrait_extractor.extract(normalized.image, profile.portrait),
+            )
+            _record_portrait_attributes(span, portrait)
+        logger.info(
+            "portrait extraction completed",
+            extra={
+                "event": "portrait_extraction_completed",
+                "stage": "portrait_extraction",
+                "portrait_region_found": portrait.clamped_region is not None,
+                "crop_width": portrait.clamped_region.width if portrait.clamped_region else None,
+                "crop_height": portrait.clamped_region.height if portrait.clamped_region else None,
+                "face_detected": portrait.face_detected,
+                "face_count": portrait.face_count,
+                "face_confidence": portrait.face.confidence if portrait.face else None,
+                "outcome": portrait.status.value,
+                "eligible": portrait.eligible_for_face_match,
+            },
+        )
+        issues.extend(_portrait_issues(portrait))
+
         qr_code: QrCodeResult | None = None
         if profile.qr_code is not None:
             try:
@@ -219,6 +253,7 @@ class KycPipeline:
                 timings,
                 detection=detection,
                 profile_id=profile.profile_id,
+                portrait=portrait,
             )
 
         try:
@@ -239,12 +274,25 @@ class KycPipeline:
                 timings,
                 detection=detection,
                 profile_id=profile.profile_id,
+                portrait=portrait,
             )
-        with observe_pipeline_stage("reconciliation"):
-            reconciled = _timed(
+        try:
+            with observe_pipeline_stage("reconciliation", error_code="RECONCILIATION_FAILED"):
+                reconciled = _timed(
+                    "reconciliation",
+                    timings,
+                    lambda: self.reconciler.reconcile(profile, candidates),
+                )
+        except Exception:
+            return _failed(
+                processing_id,
                 "reconciliation",
+                "RECONCILIATION_FAILED",
+                "Document fields could not be reconciled safely",
                 timings,
-                lambda: self.reconciler.reconcile(profile, candidates),
+                detection=detection,
+                profile_id=profile.profile_id,
+                portrait=portrait,
             )
         issues.extend(reconciled.issues)
         status = (
@@ -253,7 +301,7 @@ class KycPipeline:
             else ProcessingStatus.SUCCESS
         )
         return KycExtractionResult(
-            schema_version="1.1",
+            schema_version="1.2",
             processing_id=processing_id,
             status=status,
             document_type=detection.document_type,
@@ -264,6 +312,7 @@ class KycPipeline:
             issues=tuple(issues),
             timings_ms=timings,
             qr_code=qr_code,
+            portrait=portrait,
         )
 
 
@@ -284,9 +333,10 @@ def _failed(
     *,
     detection=None,
     profile_id: str | None = None,
+    portrait: PortraitExtractionResult | None = None,
 ) -> KycExtractionResult:
     return KycExtractionResult(
-        schema_version="1.1",
+        schema_version="1.2",
         processing_id=processing_id,
         status=ProcessingStatus.FAILED,
         document_type=getattr(detection, "document_type", None),
@@ -303,6 +353,7 @@ def _failed(
             ),
         ),
         timings_ms=timings,
+        portrait=portrait,
     )
 
 
@@ -312,3 +363,28 @@ def _qr_issue_code(status: QrCodeStatus) -> str:
         QrCodeStatus.DECODE_FAILED: "QR_DECODE_FAILED",
         QrCodeStatus.PARSE_FAILED: "QR_PARSE_FAILED",
     }[status]
+
+
+def _portrait_issues(portrait: PortraitExtractionResult) -> tuple[PipelineIssue, ...]:
+    return tuple(
+        PipelineIssue(
+            stage="portrait_extraction",
+            code=code,
+            severity=IssueSeverity.WARNING,
+            message="The document portrait could not be made eligible for future face matching",
+        )
+        for code in portrait.warnings
+    )
+
+
+def _record_portrait_attributes(span, portrait: PortraitExtractionResult) -> None:
+    span.set_attribute("kyc.portrait.region_found", portrait.clamped_region is not None)
+    if portrait.clamped_region is not None:
+        span.set_attribute("kyc.portrait.crop_width", portrait.clamped_region.width)
+        span.set_attribute("kyc.portrait.crop_height", portrait.clamped_region.height)
+    span.set_attribute("kyc.portrait.face_detected", portrait.face_detected)
+    span.set_attribute("kyc.portrait.face_count", portrait.face_count)
+    span.set_attribute("kyc.portrait.eligible", portrait.eligible_for_face_match)
+    span.set_attribute("kyc.portrait.outcome", portrait.status.value)
+    if portrait.face is not None and portrait.face.confidence is not None:
+        span.set_attribute("kyc.portrait.face_confidence", portrait.face.confidence)

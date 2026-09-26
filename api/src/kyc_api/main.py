@@ -13,6 +13,7 @@ from starlette.formparsers import MultiPartParser
 
 from kyc_engine import CaptureAssessmentInputError, DocumentCaptureAssessor, DocumentCoordinator, LivenessEvaluator
 from kyc_engine.intake import ImageIntake
+from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 from . import __version__
 from .auth import require_api_key
@@ -79,6 +80,7 @@ def create_app(
     metrics: MetricsRegistry | None = None,
     rate_limiter: ApiKeyRateLimiter | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
+    portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -99,11 +101,22 @@ def create_app(
                 service_version=__version__,
                 export=telemetry_export,
             )
+            resolved_artifacts = (
+                portrait_artifacts
+                or getattr(coordinator, "portrait_artifacts", None)
+                or getattr(session_store, "portrait_artifacts", None)
+                or InMemoryPortraitArtifactStore(
+                    pending_ttl_seconds=max(60.0, resolved_settings.job_timeout_seconds + 5.0)
+                )
+            )
             resolved_store = session_store or SessionStore(
                 ttl_seconds=resolved_settings.session_ttl_seconds,
                 max_sessions=resolved_settings.max_sessions,
+                portrait_artifacts=resolved_artifacts,
             )
-            resolved_coordinator = coordinator or create_coordinator(resolved_settings)
+            resolved_coordinator = coordinator or create_coordinator(
+                resolved_settings, portrait_artifacts=resolved_artifacts
+            )
             resolved_capture_assessor = capture_assessor or create_capture_assessor(
                 resolved_settings
             )

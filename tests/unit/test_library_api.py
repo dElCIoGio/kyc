@@ -42,6 +42,8 @@ class LibraryApiTests(unittest.TestCase):
         self.assertIsInstance(coordinator, DocumentCoordinator)
         self.assertIs(front_pipeline, coordinator.front_pipeline)
         self.assertIs(back_pipeline, coordinator.back_pipeline)
+        self.assertIsNotNone(coordinator.portrait_artifacts)
+        shared_artifacts = coordinator.portrait_artifacts
         self.assertEqual(
             [
                 {
@@ -50,6 +52,7 @@ class LibraryApiTests(unittest.TestCase):
                     "detector": front_detector,
                     "intake_limits": limits,
                     "side": "front",
+                    "portrait_artifacts": shared_artifacts,
                 },
                 {
                     "model_manifest": Path("private-models/manifest.json"),
@@ -57,6 +60,7 @@ class LibraryApiTests(unittest.TestCase):
                     "detector": back_detector,
                     "intake_limits": limits,
                     "side": "back",
+                    "portrait_artifacts": shared_artifacts,
                 },
             ],
             [call.kwargs for call in build_pipeline.call_args_list],

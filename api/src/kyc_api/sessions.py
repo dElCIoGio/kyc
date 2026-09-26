@@ -11,6 +11,7 @@ from kyc_engine import (
     LivenessResult,
     ProcessingStatus,
 )
+from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 from .models import (
     CaptureStatus,
@@ -114,7 +115,13 @@ class SessionStore:
         VerificationStatus.EXPIRED,
     }
 
-    def __init__(self, *, ttl_seconds: int, max_sessions: int) -> None:
+    def __init__(
+        self,
+        *,
+        ttl_seconds: int,
+        max_sessions: int,
+        portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
+    ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         if max_sessions <= 0:
@@ -123,6 +130,7 @@ class SessionStore:
         self._max_sessions = max_sessions
         self._records: dict[str, _SessionRecord] = {}
         self._lock = RLock()
+        self.portrait_artifacts = portrait_artifacts
 
     def create(self) -> SessionSnapshot:
         with self._lock:
@@ -233,6 +241,24 @@ class SessionStore:
                 return None
             assert record is not None
             document = record.document
+            artifact_ids = _portrait_artifact_ids(result)
+            if artifact_ids and result.status == ProcessingStatus.FAILED:
+                if self.portrait_artifacts is not None:
+                    self.portrait_artifacts.release_pending(artifact_ids)
+                artifact_ids = ()
+            if artifact_ids and (
+                self.portrait_artifacts is None
+                or not self.portrait_artifacts.claim(artifact_ids, session_id)
+            ):
+                if self.portrait_artifacts is not None:
+                    self.portrait_artifacts.release_pending(artifact_ids)
+                _clear_document_sources(document)
+                document.result = None
+                document.error_code = "PORTRAIT_ARTIFACT_CLAIM_FAILED"
+                document.status = DocumentStatus.FAILED
+                record.event_sequence += 1
+                self._refresh_expiry(record)
+                return _snapshot(record)
             _clear_document_sources(document)
             document.result = result
             document.error_code = None
@@ -349,7 +375,17 @@ class SessionStore:
         with self._lock:
             record = self._records.pop(session_id, None)
             if record is not None:
-                _clear_sensitive_state(record)
+                self._clear_sensitive_state(record)
+
+    def resolve_portrait_artifact(self, session_id: str):
+        """Internal-only future matcher boundary; no API route calls this method."""
+        with self._lock:
+            record = self._get_record(session_id)
+            result = record.document.result
+            portrait = result.front.portrait if result is not None and result.front is not None else None
+            if portrait is None or portrait.artifact_id is None or self.portrait_artifacts is None:
+                return None
+            return self.portrait_artifacts.get(portrait.artifact_id, session_id=session_id)
 
     def contains_images(self, session_id: str) -> bool:
         """Testing and diagnostics helper; never exposes image bytes."""
@@ -385,11 +421,18 @@ class SessionStore:
         for session_id in expired:
             record = self._records.pop(session_id)
             record.status = VerificationStatus.EXPIRED
-            _clear_sensitive_state(record)
+            self._clear_sensitive_state(record)
         return len(expired)
 
     def _refresh_expiry(self, record: _SessionRecord) -> None:
         record.expires_at = _now() + self._ttl
+
+    def _clear_sensitive_state(self, record: _SessionRecord) -> None:
+        if self.portrait_artifacts is not None:
+            self.portrait_artifacts.release_owned(
+                _portrait_artifact_ids(record.document.result), record.session_id
+            )
+        _clear_sensitive_state(record)
 
 
 def _snapshot(record: _SessionRecord) -> SessionSnapshot:
@@ -433,6 +476,18 @@ def _clear_sensitive_state(record: _SessionRecord) -> None:
     record.document.result = None
     record.liveness.result = None
     record.liveness.error_code = None
+
+
+def _portrait_artifact_ids(result: DocumentExtractionResult | None) -> tuple[str, ...]:
+    if result is None:
+        return ()
+    return tuple(
+        side_result.portrait.artifact_id
+        for side_result in (result.front, result.back)
+        if side_result is not None
+        and side_result.portrait is not None
+        and side_result.portrait.artifact_id is not None
+    )
 
 
 def _now() -> datetime:

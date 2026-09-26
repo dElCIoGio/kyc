@@ -17,6 +17,9 @@ from .contracts import (
     ExtractedField,
     FieldDefinition,
     FieldStatus,
+    FaceCandidate,
+    FaceDetectionResult,
+    FaceDetector,
     ImageSource,
     InputImage,
     KycExtractionResult,
@@ -25,6 +28,9 @@ from .contracts import (
     PipelineIssue,
     Point,
     ProcessingStatus,
+    PortraitDefinition,
+    PortraitExtractionResult,
+    PortraitStatus,
     QrCodeResult,
     QrCodeStatus,
     QrIdentityData,
@@ -46,6 +52,8 @@ from .defaults import build_paddle_document_coordinator
 from .onnx_detection import OnnxDetectorManifest, OnnxDocumentDetector
 from .ocr import PaddleOcrModelManifest, PaddleOCRTextRecognizer, TextRecognizer
 from .qr import QrCodeExtractor
+from .portrait import OpenCVHaarFaceDetector, PortraitExtractor
+from .portrait_artifacts import InMemoryPortraitArtifactStore, PortraitArtifactStoreError
 
 __all__ = [
     "AntiSpoofDetector",
@@ -62,6 +70,9 @@ __all__ = [
     "ExtractedField",
     "FieldDefinition",
     "FieldStatus",
+    "FaceCandidate",
+    "FaceDetectionResult",
+    "FaceDetector",
     "ImageSource",
     "InputImage",
     "IntakeLimits",
@@ -89,10 +100,17 @@ __all__ = [
     "PipelineIssue",
     "Point",
     "ProcessingStatus",
+    "PortraitDefinition",
+    "PortraitExtractionResult",
+    "PortraitExtractor",
+    "PortraitArtifactStoreError",
+    "PortraitStatus",
     "QrCodeExtractor",
     "QrCodeResult",
     "QrCodeStatus",
     "QrIdentityData",
     "Quadrilateral",
     "TextRecognizer",
+    "OpenCVHaarFaceDetector",
+    "InMemoryPortraitArtifactStore",
 ]

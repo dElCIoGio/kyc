@@ -57,6 +57,18 @@ class QrCodeStatus(str, Enum):
     PARSE_FAILED = "parse_failed"
 
 
+class PortraitStatus(str, Enum):
+    NOT_CONFIGURED = "not_configured"
+    AVAILABLE = "available"
+    CROP_INVALID = "crop_invalid"
+    TOO_SMALL = "too_small"
+    FACE_NOT_FOUND = "face_not_found"
+    FACE_TOO_SMALL = "face_too_small"
+    MULTIPLE_FACES = "multiple_faces"
+    DETECTOR_FAILED = "detector_failed"
+    ARTIFACT_FAILED = "artifact_failed"
+
+
 @dataclass(frozen=True)
 class Point:
     x: float
@@ -255,6 +267,33 @@ class QrCodeDefinition:
 
 
 @dataclass(frozen=True)
+class PortraitDefinition:
+    """Expected portrait location in canonical normalized document coordinates."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in (self.x, self.y, self.width, self.height)
+        ):
+            raise TypeError("Portrait definition values must be integers")
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Portrait definition dimensions must be positive")
+
+    @property
+    def right(self) -> int:
+        return self.x + self.width
+
+    @property
+    def bottom(self) -> int:
+        return self.y + self.height
+
+
+@dataclass(frozen=True)
 class DocumentProfile:
     profile_id: str
     document_type: str
@@ -264,6 +303,7 @@ class DocumentProfile:
     review_status: str
     fields: tuple[FieldDefinition, ...]
     qr_code: QrCodeDefinition | None = None
+    portrait: PortraitDefinition | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", tuple(self.fields))
@@ -332,6 +372,61 @@ class FieldCrop:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "image", readonly_image(self.image))
+
+
+@dataclass(frozen=True)
+class FaceCandidate:
+    """One face localized within a portrait crop."""
+
+    bounding_box: BoundingBox
+    confidence: float | None = None
+    landmarks: tuple[Point, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.confidence is not None:
+            if (
+                isinstance(self.confidence, bool)
+                or not isinstance(self.confidence, (int, float))
+                or not isfinite(self.confidence)
+                or not 0.0 <= self.confidence <= 1.0
+            ):
+                raise ValueError("Face confidence must be finite and between 0 and 1")
+            object.__setattr__(self, "confidence", float(self.confidence))
+        object.__setattr__(self, "landmarks", tuple(self.landmarks))
+
+
+@dataclass(frozen=True)
+class FaceDetectionResult:
+    candidates: tuple[FaceCandidate, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+
+
+class FaceDetector(Protocol):
+    """Face-localization boundary; it does not perform identity verification."""
+
+    def detect(self, image: Image) -> FaceDetectionResult: ...
+
+
+@dataclass(frozen=True)
+class PortraitExtractionResult:
+    """Internal portrait state. Artifact IDs and biometric details never serialize."""
+
+    status: PortraitStatus
+    requested_region: PortraitDefinition | None
+    clamped_region: BoundingBox | None
+    face_detected: bool
+    face_count: int
+    face: FaceCandidate | None
+    eligible_for_face_match: bool
+    warnings: tuple[str, ...] = ()
+    artifact_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.face_count < 0:
+            raise ValueError("Face count cannot be negative")
+        object.__setattr__(self, "warnings", tuple(self.warnings))
 
 
 @dataclass(frozen=True)
@@ -420,6 +515,7 @@ class KycExtractionResult:
     issues: tuple[PipelineIssue, ...]
     timings_ms: Mapping[str, float]
     qr_code: QrCodeResult | None = None
+    portrait: PortraitExtractionResult | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", immutable_mapping(self.fields))
@@ -454,6 +550,7 @@ class KycExtractionResult:
                 name: _field_to_dict(value) for name, value in self.fields.items()
             },
             "qr_code": _qr_code_to_dict(self.qr_code),
+            "portrait": _portrait_to_dict(self.portrait),
             "issues": [
                 {
                     "stage": issue.stage,
@@ -532,4 +629,13 @@ def _qr_code_to_dict(value: QrCodeResult | None) -> dict[str, Any] | None:
         "decoder_version": value.decoder_version,
         "variant_name": value.variant_name,
         "warnings": list(value.warnings),
+    }
+
+
+def _portrait_to_dict(value: PortraitExtractionResult | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "status": value.status.value,
+        "face_detected": value.face_detected,
     }

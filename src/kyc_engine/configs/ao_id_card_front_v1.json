@@ -5,6 +5,12 @@
   "canonical_width": 718,
   "canonical_height": 467,
   "review_status": "provisional",
+  "portrait": {
+    "x": 475,
+    "y": 120,
+    "width": 225,
+    "height": 245
+  },
   "fields": [
     {
       "name": "full_name",

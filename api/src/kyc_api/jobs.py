@@ -110,6 +110,7 @@ class JobManager:
     def _run_with_context(self, session_id: str, job_id: str, span: Span) -> None:
         started = perf_counter()
         timeout_timer: Timer | None = None
+        result = None
         try:
             try:
                 front, back, running = self._store.start_document_processing(session_id, job_id)
@@ -137,7 +138,14 @@ class JobManager:
             result = self._coordinator.process(front=front, back=back)
             span.set_attribute("kyc.processing_status", result.status.value)
             completed = self._store.complete_document_processing(session_id, job_id, result)
-            if completed is not None:
+            if completed is None:
+                self._coordinator.release_pending_artifacts(result)
+            elif completed.document.status.value == "failed":
+                self._coordinator.release_pending_artifacts(result)
+                span.set_attribute("kyc.processing_status", "failed")
+                self._publish(completed, "document.failed")
+                self._metrics.record_job("failed", (perf_counter() - started) * 1000.0)
+            else:
                 transition_reason = {
                     ProcessingStatus.SUCCESS: "document.passed",
                     ProcessingStatus.PARTIAL: "document.partial",
@@ -159,6 +167,8 @@ class JobManager:
                     },
                 )
         except Exception as exc:
+            if result is not None:
+                self._coordinator.release_pending_artifacts(result)
             duration_ms = (perf_counter() - started) * 1000.0
             span.set_attribute("exception.type", type(exc).__name__)
             span.set_status(Status(StatusCode.ERROR))

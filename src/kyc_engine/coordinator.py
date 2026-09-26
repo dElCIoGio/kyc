@@ -15,6 +15,7 @@ from .contracts import (
 )
 from .pipeline import KycPipeline
 from .instrumentation import mark_span_failed, observe_pipeline_side
+from .portrait_artifacts import InMemoryPortraitArtifactStore
 
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,25 @@ class DocumentExtractionResult:
 class DocumentCoordinator:
     """Run the already-configured front and back pipelines independently."""
 
-    def __init__(self, front_pipeline: KycPipeline, back_pipeline: KycPipeline) -> None:
+    def __init__(
+        self,
+        front_pipeline: KycPipeline,
+        back_pipeline: KycPipeline,
+        *,
+        portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
+    ) -> None:
         if not callable(getattr(front_pipeline, "process", None)):
             raise TypeError("front_pipeline must provide a callable process method")
         if not callable(getattr(back_pipeline, "process", None)):
             raise TypeError("back_pipeline must provide a callable process method")
         self.front_pipeline = front_pipeline
         self.back_pipeline = back_pipeline
+        self.portrait_artifacts = portrait_artifacts
+
+    def release_pending_artifacts(self, result: DocumentExtractionResult) -> None:
+        """Release unclaimed crops when a result cannot become session-owned."""
+        if self.portrait_artifacts is not None:
+            self.portrait_artifacts.release_pending(_portrait_artifact_ids(result))
 
     def process(
         self,
@@ -102,7 +115,7 @@ class DocumentCoordinator:
             ),
         )
         return DocumentExtractionResult(
-            schema_version="1.0",
+            schema_version="1.1",
             status=status,
             front=front_result,
             back=back_result,
@@ -177,3 +190,13 @@ def _overall_status(
     ):
         return ProcessingStatus.PARTIAL
     return ProcessingStatus.SUCCESS
+
+
+def _portrait_artifact_ids(result: DocumentExtractionResult) -> tuple[str, ...]:
+    return tuple(
+        side_result.portrait.artifact_id
+        for side_result in (result.front, result.back)
+        if side_result is not None
+        and side_result.portrait is not None
+        and side_result.portrait.artifact_id is not None
+    )

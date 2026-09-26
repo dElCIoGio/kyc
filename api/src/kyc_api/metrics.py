@@ -28,6 +28,7 @@ _KNOWN_STAGE_NAMES = frozenset(
         "normalization",
         "variants",
         "quality",
+        "portrait_extraction",
         "qr",
         "field_localization",
         "ocr",

@@ -8,6 +8,9 @@ from kyc_engine import (
     DocumentCaptureAssessor,
     DocumentCoordinator,
     IntakeLimits,
+    LivenessEvaluationConfig,
+    LivenessEvaluator,
+    MiniFASNetAntiSpoofDetector,
     build_paddle_document_coordinator,
 )
 from kyc_engine.intake import ImageIntake
@@ -34,6 +37,25 @@ def create_capture_assessor(settings: ApiSettings) -> DocumentCaptureAssessor:
             min_contrast=settings.capture_min_contrast,
         ),
     )
+
+
+def create_liveness_evaluator(settings: ApiSettings) -> LivenessEvaluator | None:
+    """Build the optional passive-liveness dependency graph once at startup."""
+    if not settings.liveness_enabled:
+        return None
+    assert settings.liveness_model_root is not None
+    detector = MiniFASNetAntiSpoofDetector(settings.liveness_model_root)
+    return LivenessEvaluator(
+        detector,
+        LivenessEvaluationConfig(
+            frame_count=settings.liveness_frame_count,
+            minimum_real_ratio=settings.liveness_min_real_ratio,
+        ),
+    )
+
+
+def create_liveness_intake(settings: ApiSettings) -> ImageIntake:
+    return ImageIntake(IntakeLimits(max_encoded_bytes=settings.max_liveness_frame_bytes))
 
 
 @contextmanager

@@ -1,8 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-from kyc_engine import IntakeLimits
-from kyc_api.composition import create_coordinator
+from pathlib import Path
+
+from kyc_engine import IntakeLimits, MiniFASNetInitializationError
+from kyc_api.composition import create_coordinator, create_liveness_evaluator
 
 from helpers import FakeCoordinator, settings
 
@@ -22,6 +24,32 @@ class ApiCompositionTests(unittest.TestCase):
             device=configured.ocr_device,
             intake_limits=IntakeLimits(max_encoded_bytes=configured.max_upload_bytes),
         )
+
+    @patch("kyc_api.composition.MiniFASNetAntiSpoofDetector")
+    def test_liveness_composition_constructs_one_detector_for_the_evaluator(self, detector_class) -> None:
+        detector = object()
+        detector_class.return_value = detector
+        configured = settings(
+            liveness_enabled=True,
+            liveness_model_root=Path("private-models/liveness/minifasnet"),
+            liveness_frame_count=4,
+            liveness_min_real_ratio=0.75,
+        )
+
+        evaluator = create_liveness_evaluator(configured)
+
+        assert evaluator is not None
+        self.assertEqual(4, evaluator.frame_count)
+        self.assertIs(detector, evaluator._detector)
+        detector_class.assert_called_once_with(configured.liveness_model_root)
+
+    def test_enabled_liveness_missing_models_fails_during_composition(self) -> None:
+        configured = settings(
+            liveness_enabled=True,
+            liveness_model_root=Path("missing-private-models"),
+        )
+        with self.assertRaises(MiniFASNetInitializationError):
+            create_liveness_evaluator(configured)
 
 
 if __name__ == "__main__":

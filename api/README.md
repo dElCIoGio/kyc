@@ -16,6 +16,13 @@ python -m pip install -e "api[dev]"
 
 The OCR model must already exist locally. The service never downloads models.
 
+Enable passive liveness only in deployments that provision the local MiniFASNet
+resources and its optional dependency:
+
+```powershell
+python -m pip install -e ".[ocr,liveness]"
+```
+
 ## Configuration
 
 Required environment variables:
@@ -36,6 +43,11 @@ KYC_CAPTURE_MIN_SHARPNESS=25.0
 KYC_CAPTURE_MIN_BRIGHTNESS=35.0
 KYC_CAPTURE_MAX_BRIGHTNESS=220.0
 KYC_CAPTURE_MIN_CONTRAST=12.0
+KYC_LIVENESS_ENABLED=false
+KYC_LIVENESS_MODEL_ROOT=private-models/liveness/minifasnet
+KYC_LIVENESS_FRAME_COUNT=3
+KYC_LIVENESS_MIN_REAL_RATIO=0.6666666667
+KYC_MAX_LIVENESS_FRAME_BYTES=5242880
 KYC_SESSION_TTL_SECONDS=1800
 KYC_MAX_SESSIONS=100
 KYC_JOB_WORKERS=1
@@ -203,6 +215,26 @@ curl.exe http://127.0.0.1:8000/v1/sessions/SESSION_ID `
   -H "X-API-Key: $env:KYC_API_KEY"
 ```
 
+When passive liveness is enabled, submit exactly the configured number of JPEG
+or PNG frames as multipart `frames`. Frames are decoded through the same bounded
+image-intake policy as captures and are used only for the request evaluation;
+they are never persisted in normal session state.
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/liveness `
+  -H "X-API-Key: $env:KYC_API_KEY" `
+  -F "frames=@private-data/liveness/frame-1.jpeg;type=image/jpeg" `
+  -F "frames=@private-data/liveness/frame-2.jpeg;type=image/jpeg" `
+  -F "frames=@private-data/liveness/frame-3.jpeg;type=image/jpeg"
+```
+
+The response contains only aggregate `passed`, `passive_score`,
+`frames_evaluated`, and `real_frames` values. MiniFASNet passive liveness and
+the three-frame/two-real policy are initial uncalibrated development defaults;
+they are not a complete production biometric-verification decision. Document
+processing and liveness progress independently after document capture. Face
+matching and final `verified` decisions remain unimplemented.
+
 `POST /v1/sessions/SESSION_ID/process` remains available as a safe retry if a
 completed capture is left `ready` because bounded job capacity was unavailable.
 It returns the existing queued or processing job rather than creating a second
@@ -243,6 +275,10 @@ removed from the session immediately after processing and all retained state is
 removed on deletion or expiry. Sessions do not survive process restarts. Deleting
 a currently running session removes its tracked state but cannot interrupt native
 OCR work that has already started.
+
+Liveness frames are not added to session state or `LivenessResult`. A future
+face-matching stage may use a separate, explicitly transient `LivenessArtifacts`
+boundary for a selected reference frame; it does not exist yet.
 
 The first version is intended for one trusted, single-process deployment. Running
 multiple Uvicorn workers creates independent session stores; use exactly one

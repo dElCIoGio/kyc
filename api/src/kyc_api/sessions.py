@@ -309,9 +309,11 @@ class SessionStore:
             ):
                 return None
             record.liveness.result = result
-            record.liveness.error_code = None
             record.liveness.status = (
                 LivenessStatus.PASSED if result.passed else LivenessStatus.FAILED
+            )
+            record.liveness.error_code = (
+                None if result.passed else "PASSIVE_LIVENESS_FAILED"
             )
             record.event_sequence += 1
             self._refresh_expiry(record)

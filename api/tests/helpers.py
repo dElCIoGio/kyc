@@ -12,6 +12,7 @@ from kyc_engine import (
     DocumentExtractionResult,
     KycExtractionResult,
     ProcessingStatus,
+    LivenessResult,
 )
 from kyc_api.models import DocumentSide
 
@@ -108,6 +109,28 @@ class FakeCoordinator:
         if self.fail:
             raise RuntimeError("sensitive backend failure")
         return self.output
+
+
+class FakeLivenessEvaluator:
+    def __init__(
+        self,
+        result: LivenessResult | None = None,
+        *,
+        frame_count: int = 3,
+        error: Exception | None = None,
+    ) -> None:
+        self.frame_count = frame_count
+        self.result = result or LivenessResult(True, 0.9, frame_count, frame_count)
+        self.error = error
+        self.calls = 0
+        self.frames: tuple | None = None
+
+    def evaluate(self, frames) -> LivenessResult:
+        self.calls += 1
+        self.frames = tuple(frames)
+        if self.error is not None:
+            raise self.error
+        return self.result
 
 
 def accepted_capture_assessment() -> CaptureAssessment:

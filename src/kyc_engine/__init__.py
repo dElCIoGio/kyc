@@ -31,7 +31,7 @@ from .contracts import (
     Quadrilateral,
 )
 from .capture import CaptureAssessmentConfig, CaptureAssessmentInputError, DocumentCaptureAssessor
-from .liveness import LivenessEvaluationConfig, LivenessEvaluator
+from .liveness import LivenessEvaluationConfig, LivenessEvaluator, LivenessFrameError, LivenessNoFaceError
 from .minifasnet import (
     MiniFASNetAntiSpoofDetector,
     MiniFASNetError,
@@ -69,6 +69,8 @@ __all__ = [
     "KycPipeline",
     "LivenessEvaluationConfig",
     "LivenessEvaluator",
+    "LivenessFrameError",
+    "LivenessNoFaceError",
     "LivenessResult",
     "MiniFASNetAntiSpoofDetector",
     "MiniFASNetError",

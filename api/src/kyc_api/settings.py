@@ -25,6 +25,11 @@ class ApiSettings(BaseSettings):
     capture_min_brightness: float = Field(default=35.0, ge=0, le=255)
     capture_max_brightness: float = Field(default=220.0, ge=0, le=255)
     capture_min_contrast: float = Field(default=12.0, ge=0)
+    liveness_enabled: bool = False
+    liveness_model_root: Path | None = None
+    liveness_frame_count: int = Field(default=3, gt=0)
+    liveness_min_real_ratio: float = Field(default=2.0 / 3.0, gt=0.0, le=1.0)
+    max_liveness_frame_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
     max_sessions: int = Field(default=100, gt=0)
     job_workers: int = Field(default=1, gt=0)
@@ -75,6 +80,12 @@ class ApiSettings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_liveness_configuration(self) -> "ApiSettings":
+        if self.liveness_enabled and self.liveness_model_root is None:
+            raise ValueError("KYC_LIVENESS_MODEL_ROOT is required when KYC_LIVENESS_ENABLED is true")
+        return self
+
+    @model_validator(mode="after")
     def validate_webhook_configuration(self) -> "ApiSettings":
         if bool(self.webhook_url) != bool(self.webhook_secret):
             raise ValueError("KYC_WEBHOOK_URL and KYC_WEBHOOK_SECRET must be configured together")
@@ -97,4 +108,7 @@ class ApiSettings(BaseSettings):
 
     @property
     def max_request_bytes(self) -> int:
-        return self.max_upload_bytes + 64 * 1024
+        return max(
+            self.max_upload_bytes,
+            self.liveness_frame_count * self.max_liveness_frame_bytes,
+        ) + 64 * 1024

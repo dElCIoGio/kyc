@@ -11,11 +11,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.formparsers import MultiPartParser
 
-from kyc_engine import CaptureAssessmentInputError, DocumentCaptureAssessor, DocumentCoordinator
+from kyc_engine import CaptureAssessmentInputError, DocumentCaptureAssessor, DocumentCoordinator, LivenessEvaluator
+from kyc_engine.intake import ImageIntake
 
 from . import __version__
 from .auth import require_api_key
-from .composition import create_capture_assessor, create_coordinator
+from .composition import (
+    create_capture_assessor,
+    create_coordinator,
+    create_liveness_evaluator,
+    create_liveness_intake,
+)
 from .jobs import JobCapacityExceeded, JobManager
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
@@ -36,6 +42,8 @@ from .models import (
     ErrorResponse,
     HealthResponse,
     JobStatusResponse,
+    LivenessResponse,
+    LivenessSubmissionResponse,
     MetricsResponse,
     SessionResponse,
     SubsystemStateResponse,
@@ -50,7 +58,7 @@ from .sessions import (
     SessionStoreError,
 )
 from .settings import ApiSettings
-from .verification import VerificationManager
+from .verification import LivenessSubmissionError, VerificationManager
 from .webhooks import WebhookDispatcher, WebhookOutbox
 
 
@@ -64,6 +72,8 @@ def create_app(
     settings: ApiSettings | None = None,
     coordinator: DocumentCoordinator | None = None,
     capture_assessor: DocumentCaptureAssessor | None = None,
+    liveness_evaluator: LivenessEvaluator | None = None,
+    liveness_intake: ImageIntake | None = None,
     session_store: SessionStore | None = None,
     executor: Executor | None = None,
     metrics: MetricsRegistry | None = None,
@@ -95,6 +105,14 @@ def create_app(
             )
             resolved_coordinator = coordinator or create_coordinator(resolved_settings)
             resolved_capture_assessor = capture_assessor or create_capture_assessor(
+                resolved_settings
+            )
+            resolved_liveness_evaluator = (
+                liveness_evaluator
+                if liveness_evaluator is not None
+                else create_liveness_evaluator(resolved_settings)
+            )
+            resolved_liveness_intake = liveness_intake or create_liveness_intake(
                 resolved_settings
             )
             resolved_metrics = metrics or MetricsRegistry()
@@ -130,6 +148,8 @@ def create_app(
                 assessor=resolved_capture_assessor,
                 store=resolved_store,
                 jobs=manager,
+                liveness_evaluator=resolved_liveness_evaluator,
+                liveness_intake=resolved_liveness_intake,
                 snapshot_publisher=(
                     resolved_dispatcher.enqueue if resolved_dispatcher is not None else None
                 ),
@@ -276,6 +296,56 @@ def create_app(
                     for issue in submission.assessment.issues
                 ),
                 verification=_session_response(snapshot),
+            )
+
+    @application.post(
+        "/v1/sessions/{session_id}/liveness",
+        response_model=LivenessSubmissionResponse,
+        dependencies=[Depends(require_api_key)],
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            415: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
+    async def submit_liveness(
+        session_id: str,
+        request: Request,
+        frames: list[UploadFile] = File(...),
+    ) -> LivenessSubmissionResponse:
+        with _session_logging_context(request, session_id):
+            try:
+                expected_frames = request.app.state.verifications.liveness_frame_count
+                if len(frames) != expected_frames:
+                    raise _problem(422, "LIVENESS_FRAME_COUNT", "Incorrect number of liveness frames")
+                content = []
+                limit = request.app.state.settings.max_liveness_frame_bytes
+                for frame in frames:
+                    _validate_upload_metadata(frame)
+                    data = await frame.read(limit + 1)
+                    if len(data) > limit:
+                        raise _problem(413, "UPLOAD_TOO_LARGE", "Uploaded image exceeds the size limit")
+                    if not data or not _has_supported_signature(data, frame.content_type):
+                        raise _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
+                    content.append(data)
+            finally:
+                for frame in frames:
+                    await frame.close()
+
+            submission = request.app.state.verifications.submit_liveness(session_id, content)
+            return LivenessSubmissionResponse(
+                session_id=submission.snapshot.session_id,
+                liveness=LivenessResponse(
+                    status=submission.snapshot.liveness_status,
+                    passed=submission.result.passed,
+                    passive_score=submission.result.passive_score,
+                    frames_evaluated=submission.result.frames_evaluated,
+                    real_frames=submission.result.real_frames,
+                ),
             )
 
     @application.post(
@@ -447,6 +517,18 @@ def _install_error_handlers(application: FastAPI) -> None:
             429,
             "JOB_CAPACITY_EXCEEDED",
             "Job capacity has been reached",
+            request_id=_request_id(request),
+        )
+
+    @application.exception_handler(LivenessSubmissionError)
+    async def liveness_submission_error(
+        request: Request, exc: LivenessSubmissionError
+    ) -> JSONResponse:
+        _record_error(request, exc.code)
+        return _error_response(
+            exc.status_code,
+            exc.code,
+            str(exc),
             request_id=_request_id(request),
         )
 

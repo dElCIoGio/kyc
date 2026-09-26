@@ -4,7 +4,7 @@
 
 The core processes exactly one `ao_id_card/front/v1` document in memory and returns text fields. It is a modular monolith: stage responsibilities are separate, while orchestration remains one synchronous Python call.
 
-Authenticity, forgery detection, liveness, biometrics, storage, queues, HTTP APIs, frontends, and multi-card selection are outside this core.
+Authenticity, forgery detection, face matching, final biometric decisions, storage, queues, HTTP APIs, frontends, and multi-card selection are outside this core.
 
 ## Processing Stages
 
@@ -102,3 +102,13 @@ modify library results.
 
 The first API deployment is deliberately single-process. Its session store and
 job queue are in memory, so multiple server workers would create isolated state.
+
+When explicitly enabled, the API composes the optional MiniFASNet adapter into
+the model-independent `LivenessEvaluator`, then into `VerificationManager`.
+After both document captures are accepted, document processing and liveness can
+advance independently. The API accepts a bounded, configured number of
+ephemeral JPEG/PNG liveness frames; it persists only the safe aggregate
+`LivenessResult`, never source frames, crops, tensors, or reference images.
+Face matching remains blocked, and neither document nor liveness success marks
+the verification final. The passive policy is an initial uncalibrated
+development default.

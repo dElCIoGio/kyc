@@ -8,6 +8,18 @@ from typing import Iterable
 from .contracts import AntiSpoofDetector, Image, LivenessResult
 
 
+class LivenessFrameError(ValueError):
+    """A supplied frame cannot produce a passive liveness evaluation."""
+
+    code = "LIVENESS_INVALID_FRAME"
+
+
+class LivenessNoFaceError(LivenessFrameError):
+    """A valid image did not contain a usable face region."""
+
+    code = "LIVENESS_NO_FACE"
+
+
 @dataclass(frozen=True)
 class LivenessEvaluationConfig:
     """Initial uncalibrated development policy for passive liveness aggregation."""
@@ -40,6 +52,11 @@ class LivenessEvaluator:
     ) -> None:
         self._detector = detector
         self._config = config or LivenessEvaluationConfig()
+
+    @property
+    def frame_count(self) -> int:
+        """Configured frame count without exposing detector implementation details."""
+        return self._config.frame_count
 
     def evaluate(self, frames: Iterable[Image]) -> LivenessResult:
         evaluations = [

@@ -98,6 +98,25 @@ class CaptureResponse(BaseModel):
     verification: SessionResponse
 
 
+class LivenessResponse(BaseModel):
+    """Safe aggregate result; biometric frame data is never represented here."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: LivenessStatus
+    passed: bool
+    passive_score: float
+    frames_evaluated: int
+    real_frames: int
+
+
+class LivenessSubmissionResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    liveness: LivenessResponse
+
+
 class JobStatusResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 

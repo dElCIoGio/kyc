@@ -137,7 +137,7 @@ class LivenessEvaluatorTests(unittest.TestCase):
         self.assertIsNone(evaluation.live_face.selected_frame_index)
         self.assertEqual("no_eligible_frame", evaluation.live_face.selection_outcome)
 
-    def test_one_eligible_live_face_returns_a_readonly_crop(self) -> None:
+    def test_one_eligible_live_face_returns_a_readonly_original_frame(self) -> None:
         evaluator = LivenessEvaluator(
             FakeAntiSpoofDetector([AntiSpoofResult(True, 0.9)] * 3),
             face_detector=FakeFaceDetector([(_face(),), (), ()]),
@@ -146,9 +146,9 @@ class LivenessEvaluatorTests(unittest.TestCase):
 
         self.assertEqual(0, evaluation.live_face.selected_frame_index)
         self.assertEqual(1, evaluation.live_face.eligible_frame_count)
-        assert evaluation.live_face.face_crop is not None
-        self.assertEqual((80, 80, 3), evaluation.live_face.face_crop.shape)
-        self.assertFalse(evaluation.live_face.face_crop.flags.writeable)
+        assert evaluation.live_face.selected_frame is not None
+        self.assertEqual((200, 200, 3), evaluation.live_face.selected_frame.shape)
+        self.assertFalse(evaluation.live_face.selected_frame.flags.writeable)
 
     def test_several_eligible_frames_choose_the_best_deterministically(self) -> None:
         config = LivenessEvaluationConfig(min_sharpness=0.0)

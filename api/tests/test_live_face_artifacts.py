@@ -108,7 +108,7 @@ class _LiveFaceEvaluator:
                 face_count=1,
                 quality_score=0.75,
                 selection_outcome="selected",
-                face_crop=np.full((80, 80, 3), 128, dtype=np.uint8),
+                selected_frame=np.full((240, 320, 3), 128, dtype=np.uint8),
             ),
         )
 
@@ -142,7 +142,10 @@ class LiveFaceArtifactApiTests(unittest.TestCase):
             payload = response.json()
             for forbidden in ("artifact_id", "image", "pixels", "crop", "bounding_box", "path", "embedding"):
                 self.assertNotIn(forbidden, payload["liveness"])
-            self.assertIsNotNone(client.app.state.sessions.resolve_live_face_artifact(session_id))
+            retained = client.app.state.sessions.resolve_live_face_artifact(session_id)
+            self.assertIsNotNone(retained)
+            assert retained is not None
+            self.assertEqual((240, 320, 3), retained.shape)
 
 
 if __name__ == "__main__":

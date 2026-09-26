@@ -101,6 +101,20 @@ def create_app(
                 service_version=__version__,
                 export=telemetry_export,
             )
+            configured_artifact_stores = [
+                store
+                for store in (
+                    portrait_artifacts,
+                    getattr(coordinator, "portrait_artifacts", None),
+                    getattr(session_store, "portrait_artifacts", None),
+                )
+                if store is not None
+            ]
+            if len({id(store) for store in configured_artifact_stores}) > 1:
+                raise RuntimeError(
+                    "Coordinator, SessionStore, and explicit portrait artifact store "
+                    "must share the same instance"
+                )
             resolved_artifacts = (
                 portrait_artifacts
                 or getattr(coordinator, "portrait_artifacts", None)

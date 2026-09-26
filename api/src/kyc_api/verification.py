@@ -179,11 +179,11 @@ class VerificationManager:
 
         artifact_id = None
         selection = evaluation.live_face if evaluation is not None else None
-        if result.passed and selection is not None and selection.face_crop is not None:
+        if result.passed and selection is not None and selection.selected_frame is not None:
             artifacts = self._store.portrait_artifacts
             if artifacts is not None:
                 try:
-                    artifact_id = artifacts.put(selection.face_crop)
+                    artifact_id = artifacts.put(selection.selected_frame)
                 except Exception:
                     logger.warning(
                         "live face artifact retention failed",
@@ -193,7 +193,7 @@ class VerificationManager:
             session_id,
             result,
             artifact_id,
-            live_face_eligible=selection is not None and selection.face_crop is not None,
+            live_face_eligible=selection is not None and selection.selected_frame is not None,
         )
         if completed is None:
             raise SessionConflict("Liveness completion is no longer applicable")

@@ -60,15 +60,16 @@ it has no dependency on a specific anti-spoof model.
 
 The API uses its internal live-face evaluation path with the separate
 `FaceDetector` localization boundary. It considers only passive-real frames,
-requires exactly one sufficiently large face and basic crop quality, then keeps
-at most one readonly face crop in process memory. Its deterministic selection
+requires exactly one sufficiently large face and basic face-region quality, then keeps
+at most one readonly original selected frame in process memory. Its deterministic selection
 score is 40% relative face size, 30% sharpness, 20% exposure, and 10% face
 centering; anti-spoof score is intentionally not a component. No suitable crop
 does not alter the public passive-liveness decision. The artifact is pending
 until atomically claimed by the active session and is released for failure,
 late completion, deletion, or expiry. Artifact IDs, pixels, boxes, paths, and
 embeddings are never represented in API JSON. The internal
-`resolve_live_face_artifact` boundary returns a crop only when liveness passed.
+`resolve_live_face_artifact` boundary returns the selected original frame only
+when liveness passed.
 
 ## Profile Contracts
 

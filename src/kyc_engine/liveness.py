@@ -98,7 +98,7 @@ class LivenessEvaluationConfig:
 
 @dataclass(frozen=True)
 class LiveFaceSelection:
-    """Internal-only live-face selection metadata and an optional readonly crop.
+    """Internal-only live-face selection metadata and an optional readonly frame.
 
     This object is intentionally not part of :class:`LivenessResult` and must
     never be serialized by an API boundary.
@@ -111,7 +111,7 @@ class LiveFaceSelection:
     face_count: int
     quality_score: float | None
     selection_outcome: str
-    face_crop: Image | None = None
+    selected_frame: Image | None = None
 
     def __post_init__(self) -> None:
         if self.candidate_frame_count < 0 or self.eligible_frame_count < 0:
@@ -124,10 +124,12 @@ class LiveFaceSelection:
             raise ValueError("Live-face count cannot be negative")
         if self.quality_score is not None and not 0.0 <= self.quality_score <= 1.0:
             raise ValueError("Live-face quality score must be between 0 and 1")
-        if (self.selected_frame_index is None) != (self.face_crop is None):
-            raise ValueError("A selected live-face frame must have exactly one crop")
-        if self.face_crop is not None:
-            object.__setattr__(self, "face_crop", readonly_image(self.face_crop, copy=True))
+        if (self.selected_frame_index is None) != (self.selected_frame is None):
+            raise ValueError("A selected live-face index must have exactly one frame")
+        if self.selected_frame is not None:
+            object.__setattr__(
+                self, "selected_frame", readonly_image(self.selected_frame, copy=True)
+            )
 
 
 @dataclass(frozen=True)
@@ -161,7 +163,7 @@ class LivenessEvaluator:
         return self._passive_evaluate(tuple(islice(frames, self._config.frame_count)))[0]
 
     def evaluate_with_live_face(self, frames: Iterable[Image]) -> LivenessEvaluation:
-        """Evaluate passive liveness and choose one eligible face crop internally.
+        """Evaluate passive liveness and choose one eligible source frame internally.
 
         Face-localization failures and unsuitable faces only prevent retention;
         they do not alter the established passive-liveness decision.
@@ -189,14 +191,15 @@ class LivenessEvaluator:
             max_face_count = max(max_face_count, face_count)
             if face_count != 1:
                 continue
-            candidate = _eligible_face_crop(frame, faces[0].bounding_box, self._config)
-            if candidate is None:
+            quality_score = _eligible_face_quality_score(
+                frame, faces[0].bounding_box, self._config
+            )
+            if quality_score is None:
                 continue
-            crop, quality_score = candidate
             eligible_count += 1
             # Deliberately exclude anti-spoof score. Ties retain earliest input order.
             if selected is None or quality_score > selected[1]:
-                selected = (index, quality_score, crop)
+                selected = (index, quality_score, frame)
 
         if selected is None:
             outcome = "no_real_frame" if candidate_count == 0 else "no_eligible_frame"
@@ -212,7 +215,7 @@ class LivenessEvaluator:
                     selection_outcome=outcome,
                 ),
             )
-        index, quality_score, crop = selected
+        index, quality_score, frame = selected
         return LivenessEvaluation(
             result,
             LiveFaceSelection(
@@ -223,7 +226,7 @@ class LivenessEvaluator:
                 face_count=1,
                 quality_score=quality_score,
                 selection_outcome="selected",
-                face_crop=crop,
+                selected_frame=frame,
             ),
         )
 
@@ -257,10 +260,10 @@ def _empty_selection(outcome: str) -> LiveFaceSelection:
     return LiveFaceSelection(0, 0, None, False, 0, None, outcome)
 
 
-def _eligible_face_crop(
+def _eligible_face_quality_score(
     frame: Image, box, config: LivenessEvaluationConfig
-) -> tuple[Image, float] | None:
-    """Return a crop only when geometry and basic face-crop quality pass."""
+) -> float | None:
+    """Score a temporary face-region crop only when basic quality gates pass."""
     try:
         height, width = frame.shape[:2]
         if box.right > width or box.bottom > height:
@@ -282,7 +285,7 @@ def _eligible_face_crop(
             or contrast < config.min_contrast
         ):
             return None
-        return crop, _quality_score(
+        return _quality_score(
             box.x,
             box.y,
             box.width,

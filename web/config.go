@@ -8,18 +8,15 @@ import (
 	"time"
 )
 
-const defaultMaxUploadBytes int64 = 15 * 1024 * 1024
-
 // Config contains the only settings needed by the browser-facing service.
 // KYC_API_KEY is intentionally read here and never written into a template,
 // response, or client-side asset.
 type Config struct {
-	Address        string
-	APIURL         *url.URL
-	APIKey         string
-	MaxUploadBytes int64
-	CookieSecure   bool
-	WebhookSecret  string
+	Address       string
+	APIURL        *url.URL
+	APIKey        string
+	CookieSecure  bool
+	WebhookSecret string
 }
 
 func loadConfig(lookup func(string) (string, bool)) (Config, error) {
@@ -42,14 +39,6 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("KYC_WEBHOOK_SECRET must contain at least 32 characters")
 	}
 
-	maxUploadBytes := defaultMaxUploadBytes
-	if raw, ok := lookup("KYC_WEB_MAX_UPLOAD_BYTES"); ok && strings.TrimSpace(raw) != "" {
-		maxUploadBytes, err = strconv.ParseInt(raw, 10, 64)
-		if err != nil || maxUploadBytes <= 0 {
-			return Config{}, fmt.Errorf("KYC_WEB_MAX_UPLOAD_BYTES must be a positive integer")
-		}
-	}
-
 	cookieSecure := false
 	if raw, ok := lookup("KYC_WEB_COOKIE_SECURE"); ok && strings.TrimSpace(raw) != "" {
 		cookieSecure, err = strconv.ParseBool(raw)
@@ -59,12 +48,11 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	return Config{
-		Address:        address,
-		APIURL:         apiURL,
-		APIKey:         apiKey,
-		MaxUploadBytes: maxUploadBytes,
-		CookieSecure:   cookieSecure,
-		WebhookSecret:  webhookSecret,
+		Address:       address,
+		APIURL:        apiURL,
+		APIKey:        apiKey,
+		CookieSecure:  cookieSecure,
+		WebhookSecret: webhookSecret,
 	}, nil
 }
 

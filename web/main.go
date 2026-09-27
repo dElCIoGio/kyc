@@ -24,6 +24,6 @@ func main() {
 		WriteTimeout:      50 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	log.Printf("KYC operator console listening on %s", config.Address)
+	log.Printf("KYC integration sandbox listening on %s", config.Address)
 	log.Fatal(server.ListenAndServe())
 }

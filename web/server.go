@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"io/fs"
 	"net/http"
+	"sort"
 	"strings"
+	"time"
 )
 
 //go:embed templates/*.html static/*
@@ -22,71 +23,48 @@ type server struct {
 	events    *eventHub
 	deduper   *eventDeduper
 }
-
+type alertView struct{ Title, Message string }
 type screenView struct {
-	Status        lifecycleView
-	MaxUpload     string
-	HasSession    bool
-	FrontUploaded bool
-	BackUploaded  bool
-	CanUpload     bool
-	CanProcess    bool
-	CanReset      bool
-	Error         *alertView
-	Result        *resultView
+	Sessions []sessionListView
+	Active   *sandboxView
+	Error    *alertView
 }
-
-type lifecycleView struct {
-	Label       string
-	Description string
-	Tone        string
-	Busy        bool
-	Poll        bool
+type sessionListView struct {
+	ID, Status, Created string
+	Active              bool
 }
-
-type alertView struct {
-	Title   string
-	Message string
+type sandboxView struct {
+	ID, Status, Created, Expires, NextAction, VerificationURL, CredentialExpires string
+	ResultAvailable                                                              bool
+	Workflow                                                                     []workflowView
+	Milestones                                                                   []milestoneView
+	Webhooks                                                                     []webhookView
+	Durations                                                                    []durationView
+	Result                                                                       *resultView
 }
+type workflowView struct{ Label, Detail, State string }
+type milestoneView struct{ Observed, APICreated, Type, Status, NextAction string }
+type webhookView struct{ APICreated, Received, Type, Sequence, Status, NextAction, ResultAvailable string }
+type durationView struct{ Label, Value string }
 
 func newServer(config Config, client *kycClient, sessions *sessionStore) (*server, error) {
-	templates, err := template.New("web").Funcs(template.FuncMap{
-		"dict": func(values ...any) (map[string]any, error) {
-			if len(values)%2 != 0 {
-				return nil, fmt.Errorf("dict requires key/value pairs")
-			}
-			result := make(map[string]any, len(values)/2)
-			for index := 0; index < len(values); index += 2 {
-				key, ok := values[index].(string)
-				if !ok {
-					return nil, fmt.Errorf("dict keys must be strings")
-				}
-				result[key] = values[index+1]
-			}
-			return result, nil
-		},
-	}).ParseFS(webAssets, "templates/*.html")
+	templates, err := template.New("web").ParseFS(webAssets, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
-	return &server{
-		config:    config,
-		client:    client,
-		sessions:  sessions,
-		templates: templates,
-		events:    newEventHub(),
-		deduper:   newEventDeduper(),
-	}, nil
+	return &server{config: config, client: client, sessions: sessions, templates: templates, events: newEventHub(), deduper: newEventDeduper()}, nil
 }
 
 func (server *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", server.index)
 	mux.HandleFunc("GET /healthz", server.health)
-	mux.HandleFunc("POST /checks/images/{side}", server.upload)
-	mux.HandleFunc("POST /checks/process", server.process)
-	mux.HandleFunc("GET /checks/status", server.status)
-	mux.HandleFunc("POST /checks/reset", server.reset)
+	mux.HandleFunc("POST /sandbox/sessions", server.createSession)
+	mux.HandleFunc("POST /sandbox/sessions/{sessionID}/select", server.selectSession)
+	mux.HandleFunc("GET /sandbox/sessions/{sessionID}/status", server.status)
+	mux.HandleFunc("POST /sandbox/sessions/{sessionID}/browser-token", server.rotateBrowserToken)
+	mux.HandleFunc("POST /sandbox/sessions/{sessionID}/result", server.fetchResult)
+	mux.HandleFunc("POST /sandbox/sessions/{sessionID}/delete", server.deleteSession)
 	mux.HandleFunc("POST /webhooks", server.webhook)
 	mux.HandleFunc("GET /events/stream", server.streamEvents)
 	staticFiles, err := fs.Sub(webAssets, "static")
@@ -98,289 +76,316 @@ func (server *server) routes() http.Handler {
 }
 
 func (server *server) index(writer http.ResponseWriter, request *http.Request) {
-	if _, _, exists := server.sessionFromRequest(request); exists {
-		server.renderPage(writer, request, screenView{
-			Status: lifecycleView{
-				Label:       "Restoring your check",
-				Description: "Checking the latest KYC verification status.",
-				Tone:        "neutral",
-				Busy:        true,
-				Poll:        true,
-			},
-			MaxUpload:  formatBytes(server.config.MaxUploadBytes),
-			HasSession: true,
-			CanReset:   true,
-		})
-		return
-	}
-	server.renderPage(writer, request, server.emptyScreen(nil))
+	token, _ := server.visitorFromRequest(request)
+	server.renderPage(writer, request, server.screen(token, nil))
 }
-
 func (server *server) health(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = writer.Write([]byte(`{"status":"ok","service":"kyc-operator-console"}`))
+	_, _ = writer.Write([]byte(`{"status":"ok","service":"kyc-integration-sandbox"}`))
 }
 
-func (server *server) upload(writer http.ResponseWriter, request *http.Request) {
-	side := request.PathValue("side")
-	if side != "front" && side != "back" {
-		server.renderDashboard(writer, request, server.emptyScreen(&alertView{
-			Title:   "Unsupported document side",
-			Message: "Choose either the front or back document upload area.",
-		}))
-		return
-	}
-	contentType, content, err := server.readImage(request, writer)
+func (server *server) createSession(writer http.ResponseWriter, request *http.Request) {
+	token, created, err := server.ensureVisitor(writer, request)
 	if err != nil {
-		server.renderDashboard(writer, request, server.withCurrentError(request, "Upload could not start", err))
+		server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "Sandbox session could not be created", Message: "Please try again."}))
 		return
 	}
-
-	token, session, exists := server.sessionFromRequest(request)
-	if !exists {
-		created, err := server.client.createSession(request.Context())
-		if err != nil {
-			server.renderDashboard(writer, request, server.emptyScreen(server.errorAlert("A KYC session could not be created", err)))
-			return
+	upstream, err := server.client.createSession(request.Context())
+	if err != nil {
+		server.renderDashboard(writer, request, server.screen(token, server.errorAlert("Verification session could not be created", err)))
+		return
+	}
+	observed := time.Now().UTC()
+	credential, err := server.client.issueBrowserToken(request.Context(), upstream.SessionID)
+	if err != nil {
+		server.sessions.addWithoutCredential(token, upstream, observed)
+		if created {
+			server.setSessionCookie(writer, token)
 		}
-		token, err = server.sessions.create(created.SessionID, created.ExpiresAt)
-		if err != nil {
-			server.renderDashboard(writer, request, server.emptyScreen(&alertView{
-				Title:   "A secure browser session could not be created",
-				Message: "Please try the upload again.",
-			}))
-			return
-		}
-		session = webSession{upstreamID: created.SessionID, expiresAt: created.ExpiresAt}
+		server.renderDashboard(writer, request, server.screen(token, server.errorAlert("Browser credential could not be issued", err)))
+		return
+	}
+	if !server.sessions.add(token, upstream, credential, observed) {
+		server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "Sandbox state expired", Message: "Create a new verification session."}))
+		return
+	}
+	if created {
 		server.setSessionCookie(writer, token)
 	}
-
-	uploaded, err := server.client.upload(request.Context(), session.upstreamID, side, contentType, content)
-	if err != nil {
-		if server.clearIfNotFound(writer, token, err) {
-			server.renderDashboard(writer, request, server.emptyScreen(&alertView{
-				Title:   "This check is no longer available",
-				Message: "Start another check and upload both document sides again.",
-			}))
-			return
-		}
-		server.renderDashboard(writer, request, server.withCurrentError(request, "Image could not be uploaded", err))
-		return
-	}
-	server.sessions.update(token, uploaded.ExpiresAt)
-	server.renderDashboard(writer, request, server.screenFromSession(upstreamSession{
-		Status:        uploaded.Status,
-		UploadedSides: uploaded.UploadedSides,
-		ExpiresAt:     uploaded.ExpiresAt,
-	}, nil, nil))
+	server.renderDashboard(writer, request, server.screen(token, nil))
 }
 
-func (server *server) process(writer http.ResponseWriter, request *http.Request) {
-	token, session, exists := server.sessionFromRequest(request)
-	if !exists {
-		server.renderDashboard(writer, request, server.emptyScreen(&alertView{
-			Title:   "Upload both document sides first",
-			Message: "A front and back image are required before verification can begin.",
-		}))
+func (server *server) selectSession(writer http.ResponseWriter, request *http.Request) {
+	token, ok := server.visitorFromRequest(request)
+	if !ok || !server.sessions.selectSession(token, request.PathValue("sessionID")) {
+		server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "Unknown sandbox session", Message: "Choose one of this browser's tracked sessions."}))
 		return
 	}
-	upstream, err := server.client.session(request.Context(), session.upstreamID)
-	if err != nil {
-		if server.clearIfNotFound(writer, token, err) {
-			server.renderDashboard(writer, request, server.emptyScreen(&alertView{
-				Title:   "This check is no longer available",
-				Message: "Start another check and upload both document sides again.",
-			}))
-			return
-		}
-		server.renderDashboard(writer, request, server.withCurrentError(request, "Verification could not start", err))
-		return
-	}
-	server.sessions.update(token, upstream.ExpiresAt)
-	if !hasBothSides(upstream.UploadedSides) {
-		server.renderDashboard(writer, request, server.screenFromSession(upstream, nil, &alertView{
-			Title:   "Both document sides are required",
-			Message: "Upload a front and back image before starting verification.",
-		}))
-		return
-	}
-	started, err := server.client.process(request.Context(), session.upstreamID)
-	if err != nil {
-		server.renderDashboard(writer, request, server.withCurrentError(request, "Verification could not start", err))
-		return
-	}
-	upstream.Status = started.Status
-	server.renderDashboard(writer, request, server.screenFromSession(upstream, nil, nil))
+	server.renderDashboard(writer, request, server.screen(token, nil))
 }
 
 func (server *server) status(writer http.ResponseWriter, request *http.Request) {
-	token, session, exists := server.sessionFromRequest(request)
-	if !exists {
-		server.renderDashboard(writer, request, server.emptyScreen(nil))
-		return
-	}
-	upstream, err := server.client.session(request.Context(), session.upstreamID)
-	if err != nil {
-		if server.clearIfNotFound(writer, token, err) {
-			server.renderDashboard(writer, request, server.emptyScreen(&alertView{
-				Title:   "This check has expired",
-				Message: "Start another check and upload both document sides again.",
-			}))
-			return
-		}
-		server.renderDashboard(writer, request, server.withCurrentError(request, "Status is temporarily unavailable", err))
-		return
-	}
-	server.sessions.update(token, upstream.ExpiresAt)
-	var result *documentResult
-	if (upstream.Status == "success" || upstream.Status == "partial") && upstream.ResultAvailable {
-		loaded, err := server.client.result(request.Context(), session.upstreamID)
-		if err != nil {
-			server.renderDashboard(writer, request, server.screenFromSession(upstream, nil, server.errorAlert("Results could not be loaded", err)))
-			return
-		}
-		result = &loaded
-	}
-	server.renderDashboard(writer, request, server.screenFromSession(upstream, result, nil))
-}
-
-func (server *server) reset(writer http.ResponseWriter, request *http.Request) {
-	token, session, exists := server.sessionFromRequest(request)
-	if !exists {
-		server.renderDashboard(writer, request, server.emptyScreen(nil))
-		return
-	}
-	err := server.client.deleteSession(request.Context(), session.upstreamID)
-	if err != nil {
-		var upstream *upstreamError
-		if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusNotFound {
-			server.renderDashboard(writer, request, server.withCurrentError(request, "This check could not be discarded", err))
-			return
-		}
-	}
-	server.sessions.delete(token)
-	server.clearSessionCookie(writer)
-	server.renderDashboard(writer, request, server.emptyScreen(nil))
-}
-
-func (server *server) readImage(request *http.Request, writer http.ResponseWriter) (string, []byte, error) {
-	request.Body = http.MaxBytesReader(writer, request.Body, server.config.MaxUploadBytes+64*1024)
-	reader, err := request.MultipartReader()
-	if err != nil {
-		return "", nil, clientInputError{"Choose a JPEG or PNG image to upload."}
-	}
-	for {
-		part, err := reader.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			if errors.Is(err, http.ErrBodyReadAfterClose) {
-				return "", nil, clientInputError{"The upload was interrupted. Please try again."}
-			}
-			return "", nil, clientInputError{"The upload could not be read. Please choose the image again."}
-		}
-		if part.FormName() != "image" || part.FileName() == "" {
-			continue
-		}
-		content, readErr := io.ReadAll(io.LimitReader(part, server.config.MaxUploadBytes+1))
-		_ = part.Close()
-		if readErr != nil {
-			return "", nil, clientInputError{"The upload could not be read. Please try again."}
-		}
-		if int64(len(content)) > server.config.MaxUploadBytes {
-			return "", nil, clientInputError{fmt.Sprintf("The image must be %s or smaller.", formatBytes(server.config.MaxUploadBytes))}
-		}
-		return part.Header.Get("Content-Type"), content, nil
-	}
-	return "", nil, clientInputError{"Choose a JPEG or PNG image to upload."}
-}
-
-type clientInputError struct {
-	message string
-}
-
-func (err clientInputError) Error() string { return err.message }
-
-func (server *server) sessionFromRequest(request *http.Request) (string, webSession, bool) {
-	cookie, err := request.Cookie(sessionCookieName)
-	if err != nil || cookie.Value == "" {
-		return "", webSession{}, false
-	}
-	session, ok := server.sessions.get(cookie.Value)
+	token, tracked, ok := server.ownedSession(request)
 	if !ok {
-		return cookie.Value, webSession{}, false
+		server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "Unknown sandbox session", Message: "Choose a tracked session."}))
+		return
 	}
-	return cookie.Value, session, true
+	upstream, err := server.client.session(request.Context(), tracked.Session.SessionID)
+	if err != nil {
+		if server.clearIfGone(token, tracked.Session.SessionID, err) {
+			server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "This verification session is no longer available", Message: "It expired or was deleted. Create another verification to continue."}))
+			return
+		}
+		server.renderDashboard(writer, request, server.screen(token, server.errorAlert("Safe session state is temporarily unavailable", err)))
+		return
+	}
+	server.sessions.updateSession(token, upstream.SessionID, upstream)
+	server.renderDashboard(writer, request, server.screen(token, nil))
+}
+
+func (server *server) rotateBrowserToken(writer http.ResponseWriter, request *http.Request) {
+	token, tracked, ok := server.ownedSession(request)
+	if !ok {
+		server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "Unknown sandbox session", Message: "Choose a tracked session."}))
+		return
+	}
+	credential, err := server.client.issueBrowserToken(request.Context(), tracked.Session.SessionID)
+	if err != nil {
+		server.renderDashboard(writer, request, server.screen(token, server.errorAlert("Browser credential could not be rotated", err)))
+		return
+	}
+	server.sessions.rotateCredential(token, tracked.Session.SessionID, credential, time.Now().UTC())
+	server.renderDashboard(writer, request, server.screen(token, nil))
+}
+
+func (server *server) fetchResult(writer http.ResponseWriter, request *http.Request) {
+	token, tracked, ok := server.ownedSession(request)
+	if !ok {
+		server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "Unknown sandbox session", Message: "Choose a tracked session."}))
+		return
+	}
+	if !tracked.Session.Document.ResultAvailable {
+		server.renderDashboard(writer, request, server.screen(token, &alertView{Title: "Result is not available", Message: "Wait until the API reports result_available before fetching the normalized result."}))
+		return
+	}
+	result, err := server.client.result(request.Context(), tracked.Session.SessionID)
+	if err != nil {
+		server.renderDashboard(writer, request, server.screen(token, server.errorAlert("Normalized result could not be fetched", err)))
+		return
+	}
+	server.sessions.setResult(token, tracked.Session.SessionID, result, time.Now().UTC())
+	server.renderDashboard(writer, request, server.screen(token, nil))
+}
+
+func (server *server) deleteSession(writer http.ResponseWriter, request *http.Request) {
+	token, tracked, ok := server.ownedSession(request)
+	if !ok {
+		server.renderDashboard(writer, request, server.screen(token, nil))
+		return
+	}
+	err := server.client.deleteSession(request.Context(), tracked.Session.SessionID)
+	var upstream *upstreamError
+	if err != nil && (!errors.As(err, &upstream) || upstream.StatusCode != http.StatusNotFound) {
+		server.renderDashboard(writer, request, server.screen(token, server.errorAlert("Verification session could not be deleted", err)))
+		return
+	}
+	server.sessions.delete(token, tracked.Session.SessionID)
+	server.renderDashboard(writer, request, server.screen(token, nil))
+}
+
+func (server *server) ownedSession(request *http.Request) (string, trackedSession, bool) {
+	token, ok := server.visitorFromRequest(request)
+	if !ok {
+		return "", trackedSession{}, false
+	}
+	session, ok := server.sessions.get(token, request.PathValue("sessionID"))
+	return token, session, ok
+}
+func (server *server) visitorFromRequest(request *http.Request) (string, bool) {
+	cookie, err := request.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" || !server.sessions.hasVisitor(cookie.Value) {
+		return "", false
+	}
+	return cookie.Value, true
+}
+func (server *server) ensureVisitor(writer http.ResponseWriter, request *http.Request) (string, bool, error) {
+	if token, ok := server.visitorFromRequest(request); ok {
+		return token, false, nil
+	}
+	token, err := server.sessions.createVisitor()
+	if err != nil {
+		return "", false, err
+	}
+	return token, true, nil
 }
 
 func (server *server) setSessionCookie(writer http.ResponseWriter, token string) {
-	http.SetCookie(writer, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   server.config.CookieSecure,
-		SameSite: http.SameSiteStrictMode,
-	})
+	http.SetCookie(writer, &http.Cookie{Name: sessionCookieName, Value: token, Path: "/", HttpOnly: true, Secure: server.config.CookieSecure, SameSite: http.SameSiteStrictMode})
 }
-
-func (server *server) clearSessionCookie(writer http.ResponseWriter) {
-	http.SetCookie(writer, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   server.config.CookieSecure,
-		SameSite: http.SameSiteStrictMode,
-	})
-}
-
-func (server *server) clearIfNotFound(writer http.ResponseWriter, token string, err error) bool {
+func (server *server) clearIfGone(token, sessionID string, err error) bool {
 	var upstream *upstreamError
-	if !errors.As(err, &upstream) || upstream.StatusCode != http.StatusNotFound {
+	if !errors.As(err, &upstream) || (upstream.StatusCode != http.StatusNotFound && upstream.StatusCode != http.StatusGone) {
 		return false
 	}
-	server.sessions.delete(token)
-	server.clearSessionCookie(writer)
+	server.sessions.delete(token, sessionID)
 	return true
 }
 
-func (server *server) withCurrentError(request *http.Request, title string, err error) screenView {
-	_, session, exists := server.sessionFromRequest(request)
-	if !exists {
-		return server.emptyScreen(server.errorAlert(title, err))
+func (server *server) screen(token string, alert *alertView) screenView {
+	view := screenView{Error: alert}
+	for _, tracked := range server.sessions.list(token) {
+		view.Sessions = append(view.Sessions, sessionListView{ID: tracked.Session.SessionID, Status: label(tracked.Session.Status), Created: displayTime(tracked.Session.CreatedAt), Active: false})
 	}
-	upstream, getErr := server.client.session(request.Context(), session.upstreamID)
-	if getErr != nil {
-		return screenView{
-			Status: lifecycleView{
-				Label:       "Status temporarily unavailable",
-				Description: "We could not reach the KYC service. This page will retry automatically.",
-				Tone:        "warning",
-				Busy:        true,
-				Poll:        true,
-			},
-			MaxUpload:  formatBytes(server.config.MaxUploadBytes),
-			HasSession: true,
-			CanReset:   true,
-			Error:      server.errorAlert(title, err),
+	tracked, ok := server.sessions.selected(token)
+	if !ok {
+		return view
+	}
+	for index := range view.Sessions {
+		if view.Sessions[index].ID == tracked.Session.SessionID {
+			view.Sessions[index].Active = true
 		}
 	}
-	return server.screenFromSession(upstream, nil, server.errorAlert(title, err))
+	active := makeSandboxView(tracked)
+	view.Active = &active
+	return view
+}
+
+func makeSandboxView(tracked trackedSession) sandboxView {
+	session := tracked.Session
+	view := sandboxView{ID: session.SessionID, Status: label(session.Status), Created: displayTime(session.CreatedAt), Expires: displayTime(session.ExpiresAt), NextAction: actionLabel(session.NextAction), VerificationURL: tracked.VerificationURL, CredentialExpires: displayTime(tracked.CredentialExpiresAt), ResultAvailable: session.Document.ResultAvailable, Workflow: workflowFor(session), Durations: durationsFor(session, tracked.Webhooks)}
+	milestones := append([]localMilestone(nil), tracked.Milestones...)
+	sort.Slice(milestones, func(i, j int) bool { return milestones[i].ObservedAt.Before(milestones[j].ObservedAt) })
+	for _, event := range milestones {
+		view.Milestones = append(view.Milestones, milestoneView{Observed: displayTime(event.ObservedAt), APICreated: displayTime(event.APICreatedAt), Type: label(event.Type), Status: label(event.Status), NextAction: actionLabel(event.NextAction)})
+	}
+	for _, event := range tracked.Webhooks {
+		available := "false"
+		if event.ResultAvailable {
+			available = "true"
+		}
+		view.Webhooks = append(view.Webhooks, webhookView{APICreated: displayTime(event.CreatedAt), Received: displayTime(event.ReceivedAt), Type: event.Type, Sequence: fmt.Sprintf("%d", event.Sequence), Status: label(event.Status), NextAction: actionLabel(event.NextAction), ResultAvailable: available})
+	}
+	if tracked.Result != nil {
+		result := makeResultView(*tracked.Result)
+		view.Result = &result
+	}
+	return view
+}
+
+func workflowFor(session upstreamSession) []workflowView {
+	front := workflowView{Label: "Document front", State: "pending", Detail: "Waiting for hosted verifier"}
+	if session.Document.FrontCapture == "accepted" {
+		front.State, front.Detail = "complete", "Accepted"
+	} else if actionIs(session.NextAction, "submit_document_front") {
+		front.State, front.Detail = "active", "Capture requested"
+	}
+	back := workflowView{Label: "Document back", State: "pending", Detail: "Waiting for front capture"}
+	if session.Document.BackCapture == "accepted" {
+		back.State, back.Detail = "complete", "Accepted"
+	} else if actionIs(session.NextAction, "submit_document_back") {
+		back.State, back.Detail = "active", "Capture requested"
+	}
+	document := stateWorkflow("Document processing", session.Document.Status, "")
+	liveness := stateWorkflow("Liveness", session.Liveness.Status, "not_available")
+	if actionIs(session.NextAction, "submit_liveness") && liveness.State == "pending" {
+		liveness.State, liveness.Detail = "active", "Submission requested"
+	}
+	face := stateWorkflow("Face comparison", session.FaceComparison.Status, "not_available")
+	terminal := workflowView{Label: "Terminal status", State: "pending", Detail: "Verification remains in progress"}
+	if session.Status == "completed" {
+		terminal.State, terminal.Detail = "complete", "Verification processing completed"
+	} else if session.Status == "failed" {
+		terminal.State, terminal.Detail = "failed", "Verification processing failed"
+	}
+	return []workflowView{{Label: "Session created", State: "complete", Detail: "API session created"}, front, back, document, liveness, face, terminal}
+}
+func stateWorkflow(name, status, unavailable string) workflowView {
+	view := workflowView{Label: name, State: "pending", Detail: label(status)}
+	switch status {
+	case "completed", "passed":
+		view.State = "complete"
+	case "failed":
+		view.State = "failed"
+	case "processing":
+		view.State = "active"
+	case "awaiting_capture":
+		view.Detail = "Waiting for capture"
+	}
+	if status != "" && status == unavailable {
+		view.State, view.Detail = "unavailable", "Not configured"
+	}
+	return view
+}
+func durationsFor(session upstreamSession, events []receivedWebhook) []durationView {
+	var result []durationView
+	document := firstEvent(events, "verification.document.completed", "verification.document.failed")
+	liveness := firstEvent(events, "verification.liveness.passed", "verification.liveness.failed")
+	processing := firstEvent(events, "verification.processing.completed", "verification.processing.failed")
+	if document != nil {
+		result = append(result, durationView{"Session creation → document terminal", durationBetween(session.CreatedAt, document.CreatedAt)})
+	}
+	if document != nil && liveness != nil {
+		result = append(result, durationView{"Document terminal → liveness terminal", durationBetween(document.CreatedAt, liveness.CreatedAt)})
+	}
+	if liveness != nil && processing != nil {
+		result = append(result, durationView{"Liveness terminal → processing terminal", durationBetween(liveness.CreatedAt, processing.CreatedAt)})
+	}
+	if processing != nil {
+		result = append(result, durationView{"Session creation → processing terminal", durationBetween(session.CreatedAt, processing.CreatedAt)}, durationView{"Processing event → Go receipt", durationBetween(processing.CreatedAt, processing.ReceivedAt)})
+	}
+	return result
+}
+func firstEvent(events []receivedWebhook, types ...string) *receivedWebhook {
+	for _, event := range events {
+		for _, wanted := range types {
+			if event.Type == wanted {
+				copy := event
+				return &copy
+			}
+		}
+	}
+	return nil
+}
+func durationBetween(start, end time.Time) string {
+	if start.IsZero() || end.IsZero() {
+		return "—"
+	}
+	duration := end.Sub(start)
+	if duration < 0 {
+		return "Clock offset"
+	}
+	return duration.Round(time.Millisecond).String()
+}
+func actionIs(action *string, wanted string) bool { return action != nil && *action == wanted }
+func actionLabel(action *string) string {
+	if action == nil {
+		return "None"
+	}
+	return label(*action)
+}
+func label(value string) string {
+	if value == "" {
+		return "—"
+	}
+	words := strings.Fields(strings.ReplaceAll(strings.ReplaceAll(value, ".", " "), "_", " "))
+	for index, word := range words {
+		words[index] = strings.ToUpper(word[:1]) + strings.ToLower(word[1:])
+	}
+	return strings.Join(words, " ")
+}
+func displayTime(value time.Time) string {
+	if value.IsZero() {
+		return "—"
+	}
+	return value.UTC().Format("2006-01-02 15:04:05 UTC")
 }
 
 func (server *server) errorAlert(title string, err error) *alertView {
-	var input clientInputError
-	if errors.As(err, &input) {
-		return &alertView{Title: title, Message: input.message}
-	}
 	var upstream *upstreamError
 	if errors.As(err, &upstream) {
 		message := strings.TrimSpace(upstream.Message)
 		if message == "" {
-			message = "The KYC service could not complete this request. Please try again."
+			message = "The KYC service could not complete this request."
 		}
 		if upstream.RetryAfter > 0 {
 			message += fmt.Sprintf(" Try again in %d seconds.", int(upstream.RetryAfter.Seconds()))
@@ -389,96 +394,10 @@ func (server *server) errorAlert(title string, err error) *alertView {
 	}
 	return &alertView{Title: title, Message: "The KYC service is temporarily unavailable. Please try again."}
 }
-
-func (server *server) emptyScreen(alert *alertView) screenView {
-	return screenView{
-		Status: lifecycleView{
-			Label:       "Ready for documents",
-			Description: "Upload clear images of the front and back of the identity card.",
-			Tone:        "neutral",
-		},
-		CanUpload: true,
-		MaxUpload: formatBytes(server.config.MaxUploadBytes),
-		Error:     alert,
-	}
-}
-
-func (server *server) screenFromSession(session upstreamSession, result *documentResult, alert *alertView) screenView {
-	frontUploaded := hasSide(session.UploadedSides, "front")
-	backUploaded := hasSide(session.UploadedSides, "back")
-	status := lifecycleFor(session.Status, frontUploaded, backUploaded)
-	terminal := session.Status == "success" || session.Status == "partial" || session.Status == "failed"
-	view := screenView{
-		Status:        status,
-		MaxUpload:     formatBytes(server.config.MaxUploadBytes),
-		HasSession:    true,
-		FrontUploaded: frontUploaded,
-		BackUploaded:  backUploaded,
-		CanUpload:     !terminal && session.Status != "queued" && session.Status != "running",
-		CanProcess:    frontUploaded && backUploaded && (session.Status == "created" || session.Status == "uploading"),
-		CanReset:      true,
-		Error:         alert,
-	}
-	if result != nil {
-		view.Result = makeResultView(*result)
-	}
-	return view
-}
-
-func lifecycleFor(status string, frontUploaded bool, backUploaded bool) lifecycleView {
-	switch status {
-	case "queued":
-		return lifecycleView{"Verification queued", "Your check is waiting to begin. This page will update automatically.", "neutral", true, true}
-	case "running":
-		return lifecycleView{"Verification in progress", "The KYC service is analysing the document. This can take up to 30 seconds.", "neutral", true, true}
-	case "success":
-		return lifecycleView{"Verification complete", "The extracted details are ready for review.", "success", false, false}
-	case "partial":
-		return lifecycleView{"Review required", "Some document details need operator review before this check can be completed.", "warning", false, false}
-	case "failed":
-		return lifecycleView{"Verification could not complete", "The document images and result have been cleared by the KYC service. Start a new check to try again.", "danger", false, false}
-	default:
-		if frontUploaded && backUploaded {
-			return lifecycleView{"Ready to verify", "Both document sides are uploaded. Start verification when you are ready.", "success", false, false}
-		}
-		if frontUploaded || backUploaded {
-			missing := "front"
-			if frontUploaded {
-				missing = "back"
-			}
-			return lifecycleView{"One side uploaded", "Upload the " + missing + " side to enable verification.", "neutral", false, false}
-		}
-		return lifecycleView{"Ready for documents", "Upload clear images of the front and back of the identity card.", "neutral", false, false}
-	}
-}
-
-func hasBothSides(sides []string) bool {
-	return hasSide(sides, "front") && hasSide(sides, "back")
-}
-
-func hasSide(sides []string, side string) bool {
-	for _, candidate := range sides {
-		if candidate == side {
-			return true
-		}
-	}
-	return false
-}
-
-func formatBytes(bytes int64) string {
-	if bytes < 1024*1024 {
-		return fmt.Sprintf("%d bytes", bytes)
-	}
-	return fmt.Sprintf("%.0f MB", float64(bytes)/(1024*1024))
-}
-
 func (server *server) renderPage(writer http.ResponseWriter, request *http.Request, view screenView) {
 	server.htmlHeaders(writer)
-	if err := server.templates.ExecuteTemplate(writer, "page", view); err != nil {
-		return
-	}
+	_ = server.templates.ExecuteTemplate(writer, "page", view)
 }
-
 func (server *server) renderDashboard(writer http.ResponseWriter, request *http.Request, view screenView) {
 	server.htmlHeaders(writer)
 	if !isHTMXRequest(request) {
@@ -487,16 +406,11 @@ func (server *server) renderDashboard(writer http.ResponseWriter, request *http.
 	}
 	_ = server.templates.ExecuteTemplate(writer, "dashboard", view)
 }
-
 func (server *server) htmlHeaders(writer http.ResponseWriter) {
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
 }
-
-func isHTMXRequest(request *http.Request) bool {
-	return request.Header.Get("HX-Request") == "true"
-}
-
+func isHTMXRequest(request *http.Request) bool { return request.Header.Get("HX-Request") == "true" }
 func (server *server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'")

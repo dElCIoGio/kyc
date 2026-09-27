@@ -108,7 +108,7 @@ packs are not approved for commercial or production KYC use.
 ### Docker Compose
 
 The root [`docker-compose.yml`](docker-compose.yml) builds the installable
-engine, API, and browser-facing KYC operator console. Private OCR artifacts are
+engine, API, and browser-facing KYC integration sandbox. Private OCR artifacts are
 never copied into an image: Compose mounts the ignored `private-models/`
 directory read-only at `/models`. The image build may download Python, Go, and
 frontend dependencies on its first build, but it never downloads PaddleOCR
@@ -121,19 +121,20 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
-Open the operator console at `http://127.0.0.1:8080` (or the configured
+Open the integration sandbox at `http://127.0.0.1:8080` (or the configured
 `KYC_WEB_PORT`); use `docker compose down` to stop it. The API is private to the
-Compose network and the Go console retains its API key server-side, so browsers
+Compose network and the Go sandbox keeps its API key server-side, so browsers
 never receive it. The root `.env` is ignored by Git. Its model manifest path is
 suitable for direct local Uvicorn use, while Compose supplies the corresponding
 mounted `/models/...` path to the container.
 
-The console requires a front and back JPEG/PNG image, shows upload and queued/
-running lifecycle updates, then renders a review-safe extraction summary. It
-does not persist document images or results; its in-memory browser mapping is
-lost if the console restarts, while the API's configured session TTL remains the
-authoritative retention limit. For HTTPS deployments, set
-`KYC_WEB_COOKIE_SECURE=true`.
+The sandbox creates API sessions and hosted browser credentials with the API key
+kept in Go, then opens the real hosted verifier for document and liveness work.
+It records safe session state, signed webhook history, timing milestones, and a
+normalized result for recent cookie-scoped test sessions. It never proxies
+images or renders API keys, webhook secrets, credentials digests, or biometric
+diagnostics. State is lost when the sandbox restarts and is removed on deletion
+or API session expiry. For HTTPS deployments, set `KYC_WEB_COOKIE_SECURE=true`.
 
 ## Data Safety
 

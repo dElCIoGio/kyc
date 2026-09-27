@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"path"
 	"strconv"
@@ -16,48 +13,45 @@ import (
 	"time"
 )
 
-type kycClient struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
-}
-
-func textPartHeader(fieldName string, filename string, contentType string) textproto.MIMEHeader {
-	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, fieldName, filename))
-	header.Set("Content-Type", contentType)
-	return header
-}
-
+// upstreamSession deliberately models only the stable, safe public session
+// projection. The integration sandbox never asks the API for images or engine
+// diagnostics.
 type upstreamSession struct {
-	SessionID       string    `json:"session_id"`
-	Status          string    `json:"status"`
-	CreatedAt       time.Time `json:"created_at"`
+	SessionID      string        `json:"session_id"`
+	Status         string        `json:"status"`
+	CreatedAt      time.Time     `json:"created_at"`
+	ExpiresAt      time.Time     `json:"expires_at"`
+	NextAction     *string       `json:"next_action"`
+	Document       documentState `json:"document"`
+	Liveness       checkState    `json:"liveness"`
+	FaceComparison checkState    `json:"face_comparison"`
+}
+
+type documentState struct {
+	Status          string `json:"status"`
+	FrontCapture    string `json:"front_capture"`
+	BackCapture     string `json:"back_capture"`
+	ResultAvailable bool   `json:"result_available"`
+}
+
+type checkState struct {
+	Status string `json:"status"`
+}
+
+type browserTokenResponse struct {
+	VerificationURL string    `json:"verification_url"`
 	ExpiresAt       time.Time `json:"expires_at"`
-	JobID           string    `json:"job_id"`
-	UploadedSides   []string  `json:"uploaded_sides"`
-	ResultAvailable bool      `json:"result_available"`
 }
 
-type uploadResponse struct {
-	SessionID     string    `json:"session_id"`
-	Status        string    `json:"status"`
-	Side          string    `json:"side"`
-	UploadedSides []string  `json:"uploaded_sides"`
-	ExpiresAt     time.Time `json:"expires_at"`
-}
-
-type processResponse struct {
-	SessionID string `json:"session_id"`
-	JobID     string `json:"job_id"`
-	Status    string `json:"status"`
+type kycClient struct {
+	baseURL, apiKey string
+	http            *http.Client
 }
 
 type upstreamError struct {
-	StatusCode int
-	Code       string
-	Message    string
-	RetryAfter time.Duration
+	StatusCode    int
+	Code, Message string
+	RetryAfter    time.Duration
 }
 
 func (err *upstreamError) Error() string {
@@ -68,11 +62,7 @@ func (err *upstreamError) Error() string {
 }
 
 func newKYCClient(config Config, httpClient *http.Client) *kycClient {
-	return &kycClient{
-		baseURL: strings.TrimRight(config.APIURL.String(), "/"),
-		apiKey:  config.APIKey,
-		http:    httpClient,
-	}
+	return &kycClient{baseURL: strings.TrimRight(config.APIURL.String(), "/"), apiKey: config.APIKey, http: httpClient}
 }
 
 func (client *kycClient) createSession(ctx context.Context) (upstreamSession, error) {
@@ -85,87 +75,21 @@ func (client *kycClient) session(ctx context.Context, sessionID string) (upstrea
 	return response, client.doJSON(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(sessionID), nil, nil, &response)
 }
 
-func (client *kycClient) upload(
-	ctx context.Context,
-	sessionID string,
-	side string,
-	contentType string,
-	content []byte,
-) (uploadResponse, error) {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	extension := ".bin"
-	if contentType == "image/jpeg" {
-		extension = ".jpg"
-	} else if contentType == "image/png" {
-		extension = ".png"
-	}
-	part, err := writer.CreatePart(textPartHeader("image", side+extension, contentType))
-	if err != nil {
-		return uploadResponse{}, err
-	}
-	if _, err := part.Write(content); err != nil {
-		return uploadResponse{}, err
-	}
-	if err := writer.Close(); err != nil {
-		return uploadResponse{}, err
-	}
-
-	var response uploadResponse
-	err = client.doJSON(
-		ctx,
-		http.MethodPost,
-		"/v1/sessions/"+url.PathEscape(sessionID)+"/images/"+side,
-		&body,
-		map[string]string{"Content-Type": writer.FormDataContentType()},
-		&response,
-	)
-	return response, err
+func (client *kycClient) issueBrowserToken(ctx context.Context, sessionID string) (browserTokenResponse, error) {
+	var response browserTokenResponse
+	return response, client.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(sessionID)+"/browser-token", nil, nil, &response)
 }
 
-func (client *kycClient) process(ctx context.Context, sessionID string) (processResponse, error) {
-	var response processResponse
-	return response, client.doJSON(
-		ctx,
-		http.MethodPost,
-		"/v1/sessions/"+url.PathEscape(sessionID)+"/process",
-		nil,
-		nil,
-		&response,
-	)
-}
-
-func (client *kycClient) result(ctx context.Context, sessionID string) (documentResult, error) {
-	var response documentResult
-	return response, client.doJSON(
-		ctx,
-		http.MethodGet,
-		"/v1/sessions/"+url.PathEscape(sessionID)+"/result",
-		nil,
-		nil,
-		&response,
-	)
+func (client *kycClient) result(ctx context.Context, sessionID string) (normalizedResult, error) {
+	var response normalizedResult
+	return response, client.doJSON(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(sessionID)+"/result", nil, nil, &response)
 }
 
 func (client *kycClient) deleteSession(ctx context.Context, sessionID string) error {
-	return client.doJSON(
-		ctx,
-		http.MethodDelete,
-		"/v1/sessions/"+url.PathEscape(sessionID),
-		nil,
-		nil,
-		nil,
-	)
+	return client.doJSON(ctx, http.MethodDelete, "/v1/sessions/"+url.PathEscape(sessionID), nil, nil, nil)
 }
 
-func (client *kycClient) doJSON(
-	ctx context.Context,
-	method string,
-	endpoint string,
-	body io.Reader,
-	headers map[string]string,
-	target any,
-) error {
+func (client *kycClient) doJSON(ctx context.Context, method, endpoint string, body io.Reader, headers map[string]string, target any) error {
 	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+path.Clean("/"+endpoint), body)
 	if err != nil {
 		return err
@@ -175,7 +99,6 @@ func (client *kycClient) doJSON(
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
-
 	response, err := client.http.Do(request)
 	if err != nil {
 		return err
@@ -205,10 +128,5 @@ func decodeUpstreamError(response *http.Response) *upstreamError {
 	if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {
 		retryAfter = time.Duration(seconds) * time.Second
 	}
-	return &upstreamError{
-		StatusCode: response.StatusCode,
-		Code:       payload.Error.Code,
-		Message:    payload.Error.Message,
-		RetryAfter: retryAfter,
-	}
+	return &upstreamError{StatusCode: response.StatusCode, Code: payload.Error.Code, Message: payload.Error.Message, RetryAfter: retryAfter}
 }

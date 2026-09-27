@@ -13,40 +13,65 @@ import (
 
 const webhookBodyLimit = 64 << 10
 
+var allowedWebhookTypes = map[string]bool{
+	"verification.session.created":      true,
+	"verification.document.completed":   true,
+	"verification.document.failed":      true,
+	"verification.liveness.passed":      true,
+	"verification.liveness.failed":      true,
+	"verification.processing.completed": true,
+	"verification.processing.failed":    true,
+}
+
 type inboundWebhook struct {
-	Version string `json:"version"`
-	ID string `json:"id"`
-	Type string `json:"type"`
-	Data struct {
-		SessionID string `json:"session_id"`
-		Sequence int `json:"sequence"`
-		Status string `json:"status"`
+	SchemaVersion string    `json:"schema_version"`
+	ID            string    `json:"id"`
+	Type          string    `json:"type"`
+	CreatedAt     time.Time `json:"created_at"`
+	Data          struct {
+		SessionID       string  `json:"session_id"`
+		Sequence        int     `json:"sequence"`
+		Status          string  `json:"status"`
+		NextAction      *string `json:"next_action"`
+		ResultAvailable bool    `json:"result_available"`
 	} `json:"data"`
 }
 
 func (server *server) webhook(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, webhookBodyLimit)
 	body, err := io.ReadAll(request.Body)
-	if err != nil || len(body) == 0 { http.Error(writer, "invalid webhook", http.StatusBadRequest); return }
+	if err != nil || len(body) == 0 {
+		http.Error(writer, "invalid webhook", http.StatusBadRequest)
+		return
+	}
 	id := request.Header.Get("X-KYC-Webhook-ID")
 	timestamp := request.Header.Get("X-KYC-Webhook-Timestamp")
 	signature := request.Header.Get("X-KYC-Webhook-Signature")
 	seconds, parseErr := strconv.ParseInt(timestamp, 10, 64)
 	if id == "" || parseErr != nil || abs(time.Now().Unix()-seconds) > 300 || !server.verifyWebhook(timestamp, body, signature) {
-		http.Error(writer, "unauthorized", http.StatusUnauthorized); return
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 	var event inboundWebhook
-	if json.Unmarshal(body, &event) != nil || event.Version != "1" || event.Type != "kyc.session.updated" || event.ID != id || event.Data.SessionID == "" || event.Data.Sequence < 1 {
-		http.Error(writer, "invalid webhook", http.StatusBadRequest); return
+	if json.Unmarshal(body, &event) != nil || event.SchemaVersion != "1" || event.ID != id || !allowedWebhookTypes[event.Type] || event.CreatedAt.IsZero() || event.Data.SessionID == "" || event.Data.Sequence < 1 || event.Data.Status == "" {
+		http.Error(writer, "invalid webhook", http.StatusBadRequest)
+		return
 	}
-	if !server.deduper.first(id) { writer.WriteHeader(http.StatusNoContent); return }
-	for _, token := range server.sessions.tokensForUpstream(event.Data.SessionID) { server.events.publish(token) }
+	if !server.deduper.first(id) {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	for _, token := range server.sessions.recordWebhook(receivedWebhook{ID: event.ID, Type: event.Type, SessionID: event.Data.SessionID, Status: event.Data.Status, CreatedAt: event.CreatedAt, ReceivedAt: time.Now().UTC(), Sequence: event.Data.Sequence, NextAction: event.Data.NextAction, ResultAvailable: event.Data.ResultAvailable}) {
+		server.events.publish(token)
+	}
 	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (server *server) verifyWebhook(timestamp string, body []byte, signature string) bool {
 	const prefix = "v1="
-	if len(signature) != len(prefix)+64 || signature[:len(prefix)] != prefix { return false }
+	if len(signature) != len(prefix)+64 || signature[:len(prefix)] != prefix {
+		return false
+	}
 	expected := hmac.New(sha256.New, []byte(server.config.WebhookSecret))
 	_, _ = expected.Write([]byte(timestamp))
 	_, _ = expected.Write([]byte("."))
@@ -56,26 +81,42 @@ func (server *server) verifyWebhook(timestamp string, body []byte, signature str
 }
 
 func (server *server) streamEvents(writer http.ResponseWriter, request *http.Request) {
-	token, _, ok := server.sessionFromRequest(request)
-	if !ok { writer.WriteHeader(http.StatusNoContent); return }
+	token, ok := server.visitorFromRequest(request)
+	if !ok {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
 	flusher, ok := writer.(http.Flusher)
-	if !ok { http.Error(writer, "streaming unavailable", http.StatusInternalServerError); return }
+	if !ok {
+		http.Error(writer, "streaming unavailable", http.StatusInternalServerError)
+		return
+	}
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("X-Accel-Buffering", "no")
 	channel, cancel := server.events.subscribe(token)
 	defer cancel()
-	_, _ = writer.Write([]byte(": connected\n\n")); flusher.Flush()
-	heartbeat := time.NewTicker(25 * time.Second); defer heartbeat.Stop()
+	_, _ = writer.Write([]byte(": connected\n\n"))
+	flusher.Flush()
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
-		case <-request.Context().Done(): return
+		case <-request.Context().Done():
+			return
 		case <-channel:
-			_, _ = writer.Write([]byte("event: kyc.session.updated\ndata: {}\n\n")); flusher.Flush()
+			_, _ = writer.Write([]byte("event: kyc.session.updated\ndata: {}\n\n"))
+			flusher.Flush()
 		case <-heartbeat.C:
-			_, _ = writer.Write([]byte(": keepalive\n\n")); flusher.Flush()
+			_, _ = writer.Write([]byte(": keepalive\n\n"))
+			flusher.Flush()
 		}
 	}
 }
 
-func abs(value int64) int64 { if value < 0 { return -value }; return value }
+func abs(value int64) int64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}

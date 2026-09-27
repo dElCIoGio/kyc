@@ -1,53 +1,18 @@
-document.addEventListener("dragover", function (event) {
-  if (event.target.closest("[data-drop-zone]")) event.preventDefault();
-});
-
-document.addEventListener("dragenter", function (event) {
-  const zone = event.target.closest("[data-drop-zone]");
-  if (zone) zone.closest(".upload-card").classList.add("drag-over");
-});
-
-document.addEventListener("dragleave", function (event) {
-  const zone = event.target.closest("[data-drop-zone]");
-  if (zone) zone.closest(".upload-card").classList.remove("drag-over");
-});
-
-document.addEventListener("drop", function (event) {
-  const zone = event.target.closest("[data-drop-zone]");
-  if (!zone) return;
-  event.preventDefault();
-  const form = zone.closest(".upload-card");
-  form.classList.remove("drag-over");
-  const input = form.querySelector("input[type=file]");
-  if (input.disabled || !event.dataTransfer.files.length) return;
-  input.files = event.dataTransfer.files;
-  input.dispatchEvent(new Event("change", { bubbles: true }));
-});
-
 (function () {
   var stream = null;
   var retry = null;
 
   function refresh() {
-    if (!document.getElementById("console")) return;
-    htmx.ajax("GET", "/checks/status", { target: "#console", swap: "outerHTML" });
-  }
-
-  function close() {
-    if (stream) {
-      stream.close();
-      stream = null;
-    }
+    var consoleNode = document.getElementById("console");
+    if (!consoleNode || !consoleNode.dataset.live) return;
+    var activeId = consoleNode.dataset.sessionId;
+    if (activeId) htmx.ajax("GET", "/sandbox/sessions/" + encodeURIComponent(activeId) + "/status", { target: "#console", swap: "outerHTML" });
   }
 
   function sync() {
-    var live = !!document.querySelector("#console[data-live]");
-    if (!live) {
-      close();
-      if (retry) {
-        clearTimeout(retry);
-        retry = null;
-      }
+    var consoleNode = document.getElementById("console");
+    if (!consoleNode || !consoleNode.dataset.live) {
+      if (stream) { stream.close(); stream = null; }
       return;
     }
     if (stream) return;
@@ -56,14 +21,28 @@ document.addEventListener("drop", function (event) {
     stream.onerror = function () {
       if (stream && stream.readyState === EventSource.CLOSED) {
         stream = null;
-        retry = setTimeout(function () {
-          retry = null;
-          sync();
-        }, 3000);
+        retry = setTimeout(function () { retry = null; sync(); }, 3000);
       }
     };
   }
 
+  async function copyVerificationLink(button) {
+    var value = document.querySelector("[data-verification-url]");
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value.textContent);
+      var original = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(function () { button.textContent = original; }, 1500);
+    } catch (_) {
+      button.textContent = "Copy unavailable";
+    }
+  }
+
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-copy-link]");
+    if (button) copyVerificationLink(button);
+  });
   document.addEventListener("DOMContentLoaded", sync);
   document.addEventListener("htmx:afterSwap", sync);
 })();

@@ -1,158 +1,53 @@
 {{define "dashboard"}}
-<section id="console" class="space-y-6"{{if .HasSession}} data-live="true"{{end}} {{if .Status.Poll}}hx-get="/checks/status" hx-trigger="load, every 2s" hx-swap="outerHTML"{{end}}>
+<section id="console" class="space-y-6"{{if .Active}} data-live="true" data-session-id="{{.Active.ID}}" hx-get="/sandbox/sessions/{{.Active.ID}}/status" hx-trigger="every 5s" hx-swap="outerHTML"{{end}}>
+  {{if .Error}}
+  <div class="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4" role="alert"><h2 class="font-semibold text-rose-950">{{.Error.Title}}</h2><p class="mt-1 text-sm leading-6 text-rose-800">{{.Error.Message}}</p></div>
+  {{end}}
+
+  <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+    <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div><h2 class="text-xl font-semibold tracking-tight text-slate-950">Create a verification</h2><p class="mt-1 text-sm leading-6 text-slate-600">Creates an API session and its short-lived hosted browser credential.</p></div>
+      <form method="post" action="/sandbox/sessions" hx-post="/sandbox/sessions" hx-target="#console" hx-swap="outerHTML"><button class="button button-primary" type="submit">Create verification</button></form>
+    </div>
+  </section>
+
+  {{if .Sessions}}
+  <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6" aria-labelledby="recent-title">
+    <h2 id="recent-title" class="font-semibold text-slate-950">Recent sandbox sessions</h2>
+    <div class="mt-3 flex flex-wrap gap-2">{{range .Sessions}}<form method="post" action="/sandbox/sessions/{{.ID}}/select" hx-post="/sandbox/sessions/{{.ID}}/select" hx-target="#console" hx-swap="outerHTML"><button class="button button-secondary {{if .Active}}ring-2 ring-teal-600{{end}}" type="submit"><span>{{.ID}}</span><span class="ml-2 text-xs text-slate-500">{{.Status}}</span></button></form>{{end}}</div>
+  </section>
+  {{end}}
+
+  {{if .Active}}
   <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
     <div class="space-y-6">
-      {{if .Error}}
-      <div class="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4" role="alert">
-        <h2 class="font-semibold text-rose-950">{{.Error.Title}}</h2>
-        <p class="mt-1 text-sm leading-6 text-rose-800">{{.Error.Message}}</p>
-      </div>
-      {{end}}
-
-      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6" aria-labelledby="documents-title">
-        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <p class="text-sm font-semibold text-teal-700">Step 1</p>
-            <h2 id="documents-title" class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Upload document images</h2>
-            <p class="mt-1 text-sm leading-6 text-slate-600">Use clear, uncropped JPEG or PNG images. Replacing an image updates that side before verification starts.</p>
-          </div>
-          <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">Front + back required</span>
-        </div>
-
-        <div class="mt-6 grid gap-4 sm:grid-cols-2">
-          {{template "upload-card" dict "side" "front" "label" "Front of card" "uploaded" .FrontUploaded "enabled" .CanUpload "maxUpload" .MaxUpload}}
-          {{template "upload-card" dict "side" "back" "label" "Back of card" "uploaded" .BackUploaded "enabled" .CanUpload "maxUpload" .MaxUpload}}
-        </div>
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><p class="text-sm font-semibold text-teal-700">Session</p><h2 class="mt-1 break-all text-xl font-semibold tracking-tight text-slate-950">{{.Active.ID}}</h2></div><span class="badge badge-neutral">{{.Active.Status}}</span></div>
+        <dl class="mt-5 grid gap-4 text-sm sm:grid-cols-2"><div><dt class="text-slate-500">Created</dt><dd class="mt-1 font-medium text-slate-800">{{.Active.Created}}</dd></div><div><dt class="text-slate-500">Expires</dt><dd class="mt-1 font-medium text-slate-800">{{.Active.Expires}}</dd></div><div><dt class="text-slate-500">Next action</dt><dd class="mt-1 font-medium text-slate-800">{{.Active.NextAction}}</dd></div><div><dt class="text-slate-500">Result available</dt><dd class="mt-1 font-medium text-slate-800">{{if .Active.ResultAvailable}}Yes{{else}}No{{end}}</dd></div></dl>
       </section>
 
-      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6" aria-labelledby="process-title">
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p class="text-sm font-semibold text-teal-700">Step 2</p>
-            <h2 id="process-title" class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Run verification</h2>
-            <p class="mt-1 text-sm leading-6 text-slate-600">The service processes the uploaded sides locally. Processing cannot be interrupted after it starts.</p>
-          </div>
-          <form method="post" action="/checks/process" hx-post="/checks/process" hx-target="#console" hx-swap="outerHTML" hx-disabled-elt="find button">
-            <button type="submit" class="button button-primary" {{if not .CanProcess}}disabled{{end}}>
-              <span class="htmx-indicator mr-2" aria-hidden="true">↻</span>
-              Start verification
-            </button>
-          </form>
-        </div>
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <p class="text-sm font-semibold text-teal-700">Hosted verification</p><h2 class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Use the real hosted verifier</h2>
+        {{if .Active.VerificationURL}}
+        <p class="mt-3 break-all rounded-lg bg-slate-50 p-3 font-mono text-xs text-slate-700" data-verification-url>{{.Active.VerificationURL}}</p>
+        <p class="mt-2 text-xs text-slate-500">Browser credential expires {{.Active.CredentialExpires}}. Rotating revokes the previous link.</p>
+        <div class="mt-4 flex flex-wrap gap-3"><a class="button button-primary" href="{{.Active.VerificationURL}}" target="_blank" rel="noopener noreferrer">Open verification</a><button class="button button-secondary" type="button" data-copy-link>Copy link</button><form method="post" action="/sandbox/sessions/{{.Active.ID}}/browser-token" hx-post="/sandbox/sessions/{{.Active.ID}}/browser-token" hx-target="#console" hx-swap="outerHTML"><button class="button button-secondary" type="submit">Rotate link</button></form></div>
+        {{else}}
+        <p class="mt-3 text-sm leading-6 text-rose-800">No active browser credential is available. Rotate the link to issue one.</p><form class="mt-4" method="post" action="/sandbox/sessions/{{.Active.ID}}/browser-token" hx-post="/sandbox/sessions/{{.Active.ID}}/browser-token" hx-target="#console" hx-swap="outerHTML"><button class="button button-secondary" type="submit">Issue link</button></form>
+        {{end}}
       </section>
 
-      {{if .Result}}
-      {{template "result-summary" .Result}}
-      {{end}}
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><p class="text-sm font-semibold text-teal-700">Workflow</p><h2 class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Authoritative safe state</h2><ol class="mt-5 space-y-3">{{range .Active.Workflow}}<li class="rounded-xl border border-slate-200 px-4 py-3"><div class="flex items-center justify-between gap-3"><span class="font-medium text-slate-900">{{.Label}}</span>{{if eq .State "complete"}}<span class="badge badge-success">{{.State}}</span>{{else if eq .State "failed"}}<span class="badge badge-danger">{{.State}}</span>{{else if eq .State "active"}}<span class="badge badge-warning">{{.State}}</span>{{else}}<span class="badge badge-neutral">{{.State}}</span>{{end}}</div><p class="mt-1 text-sm text-slate-600">{{.Detail}}</p></li>{{end}}</ol></section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><p class="text-sm font-semibold text-teal-700">Timing</p><h2 class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Integration milestones</h2><p class="mt-1 text-sm leading-6 text-slate-600">Milestones are observed by this Go service. Rows derived from a lifecycle webhook also show the API-created event time.</p><div class="mt-5 overflow-x-auto"><table class="w-full text-left text-sm"><thead class="text-slate-500"><tr><th class="pb-2 pr-3">Observed</th><th class="pb-2 pr-3">API created</th><th class="pb-2 pr-3">Milestone</th><th class="pb-2 pr-3">Status</th><th class="pb-2">Next action</th></tr></thead><tbody>{{range .Active.Milestones}}<tr class="border-t border-slate-100"><td class="py-2 pr-3 whitespace-nowrap">{{.Observed}}</td><td class="py-2 pr-3 whitespace-nowrap">{{.APICreated}}</td><td class="py-2 pr-3">{{.Type}}</td><td class="py-2 pr-3">{{.Status}}</td><td class="py-2">{{.NextAction}}</td></tr>{{end}}</tbody></table></div>{{if .Active.Durations}}<dl class="mt-5 grid gap-3 text-sm sm:grid-cols-2">{{range .Active.Durations}}<div class="rounded-lg bg-slate-50 p-3"><dt class="text-slate-500">{{.Label}}</dt><dd class="mt-1 font-medium text-slate-900">{{.Value}}</dd></div>{{end}}</dl>{{end}}</section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><p class="text-sm font-semibold text-teal-700">Received webhooks</p><h2 class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Deterministic lifecycle history</h2><div class="mt-5 overflow-x-auto"><table class="w-full text-left text-sm"><thead class="text-slate-500"><tr><th class="pb-2 pr-3">API timestamp</th><th class="pb-2 pr-3">Go receipt</th><th class="pb-2 pr-3">Type</th><th class="pb-2 pr-3">Sequence</th><th class="pb-2">State</th></tr></thead><tbody>{{range .Active.Webhooks}}<tr class="border-t border-slate-100"><td class="py-2 pr-3 whitespace-nowrap">{{.APICreated}}</td><td class="py-2 pr-3 whitespace-nowrap">{{.Received}}</td><td class="py-2 pr-3">{{.Type}}</td><td class="py-2 pr-3">{{.Sequence}}</td><td class="py-2">{{.Status}} · {{.NextAction}} · result {{.ResultAvailable}}</td></tr>{{else}}<tr><td class="py-3 text-slate-500" colspan="5">No lifecycle webhooks have arrived yet.</td></tr>{{end}}</tbody></table></div></section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><p class="text-sm font-semibold text-teal-700">Result</p><div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Normalized public result</h2><p class="mt-1 text-sm leading-6 text-slate-600">Only the API's safe normalized result is rendered.</p></div><form method="post" action="/sandbox/sessions/{{.Active.ID}}/result" hx-post="/sandbox/sessions/{{.Active.ID}}/result" hx-target="#console" hx-swap="outerHTML"><button class="button button-secondary" type="submit" {{if not .Active.ResultAvailable}}disabled{{end}}>Fetch result</button></form></div>{{if .Active.Result}}<dl class="mt-5 grid gap-3 text-sm sm:grid-cols-3"><div><dt class="text-slate-500">Document</dt><dd class="mt-1 font-medium">{{.Active.Result.DocumentStatus}}</dd></div><div><dt class="text-slate-500">Liveness</dt><dd class="mt-1 font-medium">{{.Active.Result.LivenessStatus}}</dd></div><div><dt class="text-slate-500">Face comparison</dt><dd class="mt-1 font-medium">{{.Active.Result.FaceComparisonStatus}}</dd></div></dl>{{if .Active.Result.Fields}}<dl class="mt-5 divide-y divide-slate-100 border-y border-slate-100">{{range .Active.Result.Fields}}<div class="py-3"><dt class="text-slate-500">{{.Name}} · {{.Status}}</dt><dd class="mt-1 break-words font-medium text-slate-900">{{.Value}}</dd></div>{{end}}</dl>{{end}}{{range .Active.Result.Issues}}<p class="mt-3 rounded-lg bg-slate-50 p-3 text-sm text-slate-700"><span class="font-medium">{{.Code}}</span>{{if .Field}} · {{.Field}}{{end}}: {{.Message}}</p>{{end}}{{end}}</section>
     </div>
 
-    <aside class="h-fit rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-6" aria-live="polite" aria-atomic="true">
-      <p class="text-sm font-semibold text-teal-700">Live status</p>
-      <div class="mt-4 flex gap-3">
-        <span class="status-dot status-{{.Status.Tone}} {{if .Status.Busy}}status-dot-busy{{end}}" aria-hidden="true"></span>
-        <div>
-          <h2 class="font-semibold text-slate-950">{{.Status.Label}}</h2>
-          <p class="mt-1 text-sm leading-6 text-slate-600">{{.Status.Description}}</p>
-        </div>
-      </div>
-
-      <ol class="mt-6 space-y-4 border-l border-slate-200 pl-4 text-sm">
-        <li class="relative"><span class="timeline-dot {{if or .FrontUploaded .BackUploaded}}timeline-complete{{end}}"></span><p class="font-medium text-slate-800">1. Document images</p><p class="mt-1 text-slate-500">{{if and .FrontUploaded .BackUploaded}}Both sides uploaded{{else}}Waiting for both sides{{end}}</p></li>
-        <li class="relative"><span class="timeline-dot {{if .Status.Busy}}timeline-active{{end}}"></span><p class="font-medium text-slate-800">2. Verification</p><p class="mt-1 text-slate-500">{{if .Status.Busy}}Processing status updates automatically{{else}}Starts after both uploads{{end}}</p></li>
-        <li class="relative"><span class="timeline-dot {{if .Result}}timeline-complete{{end}}"></span><p class="font-medium text-slate-800">3. Operator review</p><p class="mt-1 text-slate-500">{{if .Result}}Details ready to review{{else}}Available when processing finishes{{end}}</p></li>
-      </ol>
-
-      <div class="mt-6 rounded-xl bg-slate-50 p-4 text-sm leading-6 text-slate-600">
-        <p class="font-medium text-slate-800">Privacy reminder</p>
-        <p class="mt-1">This session is held only for the configured retention period. Start a new check to discard it now.</p>
-      </div>
-      {{if .CanReset}}
-      <form class="mt-4" method="post" action="/checks/reset" hx-post="/checks/reset" hx-target="#console" hx-swap="outerHTML" hx-disabled-elt="find button">
-        <button type="submit" class="button button-secondary w-full">Start a new check</button>
-      </form>
-      {{end}}
-    </aside>
+    <aside class="h-fit rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-6"><h2 class="font-semibold text-slate-950">Manual test notes</h2><p class="mt-2 text-sm leading-6 text-slate-600">Use another recent session for cross-session isolation. Reload the hosted verifier directly to exercise its state reconstruction. For expiry tests, use short development TTL environment values.</p><form class="mt-5" method="post" action="/sandbox/sessions/{{.Active.ID}}/delete" hx-post="/sandbox/sessions/{{.Active.ID}}/delete" hx-target="#console" hx-swap="outerHTML"><button class="button button-secondary w-full" type="submit">Delete session</button></form></aside>
   </div>
-</section>
-{{end}}
-
-{{define "upload-card"}}
-<form class="upload-card {{if .uploaded}}upload-card-complete{{end}}" method="post" action="/checks/images/{{.side}}" enctype="multipart/form-data" hx-post="/checks/images/{{.side}}" hx-encoding="multipart/form-data" hx-trigger="change from:input" hx-target="#console" hx-swap="outerHTML" hx-disabled-elt="find input">
-  <input class="sr-only" id="{{.side}}-image" name="image" type="file" accept="image/jpeg,image/png" {{if not .enabled}}disabled{{end}}>
-  <label for="{{.side}}-image" class="block cursor-pointer p-5 {{if not .enabled}}cursor-not-allowed opacity-60{{end}}" data-drop-zone>
-    <span class="flex h-10 w-10 items-center justify-center rounded-xl {{if .uploaded}}bg-emerald-100 text-emerald-700{{else}}bg-teal-50 text-teal-700{{end}}" aria-hidden="true">{{if .uploaded}}✓{{else}}↑{{end}}</span>
-    <span class="mt-4 block font-semibold text-slate-950">{{.label}}</span>
-    <span class="mt-1 block text-sm leading-6 text-slate-600">{{if .uploaded}}Uploaded. Choose another image to replace it.{{else}}Choose or drop an image here.{{end}}</span>
-    <span class="mt-3 block text-xs font-medium uppercase tracking-wide text-slate-500">JPEG or PNG · {{.maxUpload}} max</span>
-    <span class="htmx-indicator mt-3 text-sm font-medium text-teal-700" role="status">Uploading image…</span>
-  </label>
-</form>
-{{end}}
-
-{{define "result-summary"}}
-<section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6" aria-labelledby="results-title">
-  <div class="flex flex-col gap-3 border-b border-slate-200 pb-5 sm:flex-row sm:items-center sm:justify-between">
-    <div>
-      <p class="text-sm font-semibold text-teal-700">Step 3</p>
-      <h2 id="results-title" class="mt-1 text-xl font-semibold tracking-tight text-slate-950">Verification review</h2>
-      <p class="mt-1 text-sm leading-6 text-slate-600">Review each side independently before continuing your internal workflow.</p>
-    </div>
-    <span class="badge badge-{{.Tone}}">{{.Status}}</span>
-  </div>
-
-  <div class="mt-6 grid gap-5 xl:grid-cols-2">
-    {{if .Front}}{{template "side-summary" .Front}}{{end}}
-    {{if .Back}}{{template "side-summary" .Back}}{{end}}
-  </div>
-
-  {{if .Issues}}
-  <section class="mt-6" aria-labelledby="check-issues-title">
-    <h3 id="check-issues-title" class="text-sm font-semibold text-slate-950">Check notes</h3>
-    <ul class="mt-3 space-y-3">
-      {{range .Issues}}
-      <li class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
-        <div class="flex flex-wrap items-center gap-2"><span class="badge badge-{{.Tone}}">{{.Severity}}</span><span class="font-medium text-slate-800">{{.Code}}</span>{{if .Field}}<span class="text-slate-500">{{.Field}}</span>{{end}}</div>
-        <p class="mt-2 leading-6 text-slate-600">{{.Message}}</p>
-      </li>
-      {{end}}
-    </ul>
-  </section>
   {{end}}
 </section>
-{{end}}
-
-{{define "side-summary"}}
-<article class="rounded-xl border border-slate-200 p-4 sm:p-5">
-  <div class="flex flex-wrap items-start justify-between gap-3">
-    <div><h3 class="font-semibold text-slate-950">{{.Name}} side</h3><p class="mt-1 text-sm text-slate-600">{{.DocumentType}}</p></div>
-    <span class="badge badge-{{.Tone}}">{{.Status}}</span>
-  </div>
-  {{if .Detection}}
-  <dl class="mt-4 grid grid-cols-2 gap-3 rounded-lg bg-slate-50 p-3 text-sm">
-    <div><dt class="text-slate-500">Detection confidence</dt><dd class="mt-1 font-medium text-slate-800">{{.Detection.Confidence}}</dd></div>
-    <div><dt class="text-slate-500">Orientation</dt><dd class="mt-1 font-medium text-slate-800">{{.Detection.Orientation}}</dd></div>
-  </dl>
-  {{end}}
-  {{if .Fields}}
-  <dl class="mt-4 divide-y divide-slate-100 border-y border-slate-100">
-    {{range .Fields}}
-    <div class="py-3"><dt class="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-500"><span>{{.Name}}</span><span class="badge badge-{{.Tone}}">{{.Status}}</span></dt><dd class="mt-1 break-words font-medium text-slate-900">{{.Value}}</dd><dd class="mt-1 text-xs text-slate-500">Confidence {{.Confidence}}</dd>{{range .Warnings}}<dd class="mt-1 text-xs leading-5 text-amber-700">{{.}}</dd>{{end}}</div>
-    {{end}}
-  </dl>
-  {{else}}
-  <p class="mt-4 text-sm text-slate-500">No extracted fields were returned for this side.</p>
-  {{end}}
-  {{if .QR}}
-  <section class="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4" aria-label="QR summary">
-    <div class="flex items-center justify-between gap-3"><h4 class="text-sm font-semibold text-slate-900">QR data</h4><span class="badge badge-{{.QR.Tone}}">{{.QR.Status}}</span></div>
-    {{range .QR.Fields}}<p class="mt-2 text-sm"><span class="text-slate-500">{{.Name}}</span><span class="mx-2 text-slate-300">·</span><span class="font-medium text-slate-800">{{.Value}}</span></p>{{end}}
-    {{range .QR.Warnings}}<p class="mt-2 text-xs leading-5 text-amber-700">{{.}}</p>{{end}}
-  </section>
-  {{end}}
-  {{if .Issues}}
-  <div class="mt-4 space-y-2">
-    {{range .Issues}}<p class="rounded-lg bg-slate-50 px-3 py-2 text-sm leading-6 text-slate-600"><span class="font-medium text-slate-800">{{.Code}}</span>: {{.Message}}</p>{{end}}
-  </div>
-  {{end}}
-</article>
 {{end}}

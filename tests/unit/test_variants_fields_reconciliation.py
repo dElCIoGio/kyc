@@ -84,6 +84,17 @@ class FieldTests(unittest.TestCase):
         self.assertEqual(FieldStatus.MISSING, result.fields["full_name"].status)
         self.assertEqual("FIELD_MISSING", result.issues[0].code)
 
+    def test_ocr_repair_preserves_the_raw_candidate(self) -> None:
+        correct = "JOSÉ ÁGUA"
+        mojibake = correct.encode("utf-8").decode("latin-1")
+        candidate = self._candidate(mojibake, 0.9, "original")
+        result = CandidateReconciler().reconcile(self.profile, (candidate,))
+        field = result.fields["full_name"]
+
+        self.assertEqual(mojibake, candidate.raw_value)
+        self.assertEqual(mojibake, field.raw_value)
+        self.assertEqual(correct, field.normalized_value)
+
     def _candidate(self, value: str, confidence: float, variant: str) -> OCRCandidate:
         return OCRCandidate(
             field_name="full_name",
@@ -108,6 +119,19 @@ class FieldValueProcessorTests(unittest.TestCase):
             "LUANDA",
             processor.normalize("place_of_birth", "Natural de: LUANDA"),
         )
+
+    def test_text_repair_is_generic_and_conservative(self) -> None:
+        processor = FieldValueProcessor()
+        correct = "JOSÉ ÁGUA"
+        mojibake = correct.encode("utf-8").decode("latin-1")
+
+        self.assertEqual(correct, processor.normalize("name", mojibake))
+        windows_1252_mojibake = "DÉLCIO".encode("utf-8").decode("cp1252")
+        self.assertEqual("DÉLCIO", processor.normalize("name", windows_1252_mojibake))
+        self.assertEqual(correct, processor.normalize("name", correct))
+        self.assertEqual("PLAIN ASCII", processor.normalize("text", "PLAIN ASCII"))
+        malformed = "broken " + chr(0x81)
+        self.assertEqual(malformed, processor.normalize("text", malformed))
 
 
 if __name__ == "__main__":

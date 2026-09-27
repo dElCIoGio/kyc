@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .contracts import FieldDefinition, FieldStatus
+from .text import repair_utf8_mojibake
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,7 @@ class FieldValueProcessor:
         return self.validate(field.validator, normalized)
 
     def comparison_key(self, field: FieldDefinition, raw_value: str) -> str:
-        normalized = unicodedata.normalize("NFKC", raw_value)
+        normalized = unicodedata.normalize("NFKC", repair_utf8_mojibake(raw_value))
         if field.comparison == "casefold_whitespace":
             return _collapse_whitespace(normalized).casefold()
         if field.comparison == "alphanumeric_upper":
@@ -31,7 +32,7 @@ class FieldValueProcessor:
         raise KeyError(f"Unknown comparison strategy: {field.comparison}")
 
     def normalize(self, strategy: str, value: str) -> str | None:
-        normalized = unicodedata.normalize("NFKC", value)
+        normalized = unicodedata.normalize("NFKC", repair_utf8_mojibake(value))
         if strategy in {"text", "name"}:
             return _collapse_whitespace(normalized)
         if strategy == "residence":

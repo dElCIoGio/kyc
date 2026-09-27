@@ -17,6 +17,7 @@ from .contracts import (
     VariantBatch,
     VariantInfo,
 )
+from .text import repair_utf8_mojibake
 
 
 logger = logging.getLogger(__name__)
@@ -24,9 +25,9 @@ logger = logging.getLogger(__name__)
 _PREFERRED_VARIANTS = (
     "original",
     "grayscale",
-    "clahe_clip_2_grid_8x8",
-    "gamma_0.8",
-    "gamma_1.2",
+    "clahe",
+    "gamma_0_75",
+    "gamma_1_25",
 )
 _DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 _VERSION_PATTERN = re.compile(r"\bV(?P<version>\d+)\s*$", re.IGNORECASE)
@@ -117,8 +118,14 @@ class QrCodeExtractor:
             return None
         if barcode is None:
             return None
+        raw_bytes = _barcode_bytes(barcode)
+        if raw_bytes is not None:
+            try:
+                return raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
         value = getattr(barcode, "text", None)
-        return value if isinstance(value, str) and value else None
+        return repair_utf8_mojibake(value) if isinstance(value, str) and value else None
 
 
 def parse_qr_payload(payload: str) -> QrIdentityData | None:
@@ -167,6 +174,18 @@ def _preferred_variants(batches: Sequence[VariantBatch]) -> tuple[VariantInfo, .
         for variant in batch.variants
     }
     return tuple(variants[name] for name in _PREFERRED_VARIANTS if name in variants)
+
+
+def _barcode_bytes(barcode: Any) -> bytes | None:
+    """Return ZXing's source bytes when the installed binding exposes them."""
+    value = getattr(barcode, "bytes", None)
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    return None
 
 
 def _crop(image: np.ndarray, definition: QrCodeDefinition) -> np.ndarray:

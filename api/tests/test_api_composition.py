@@ -93,6 +93,12 @@ class ApiCompositionTests(unittest.TestCase):
         with self.assertRaises(FaceRecognitionInitializationError):
             create_face_recognizer(configured)
 
+    def test_face_match_workers_are_bounded_by_session_capacity(self) -> None:
+        self.assertEqual(1, settings().face_match_workers)
+        self.assertEqual(3, settings(max_sessions=3, face_match_workers=3).face_match_workers)
+        with self.assertRaisesRegex(ValueError, "KYC_FACE_MATCH_WORKERS"):
+            settings(max_sessions=3, face_match_workers=4)
+
 
 if __name__ == "__main__":
     unittest.main()

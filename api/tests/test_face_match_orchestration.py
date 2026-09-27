@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -19,8 +20,10 @@ from kyc_engine.face_comparison import FaceComparisonError
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 from kyc_api.main import create_app
 from kyc_api.models import FaceMatchStatus, VerificationStatus
-from kyc_api.orchestration import VerificationOrchestrator
+from kyc_api.orchestration import FaceMatchDispatcher, VerificationOrchestrator
 from kyc_api.sessions import SessionConflict, SessionStore
+from kyc_api.verification import VerificationManager
+from kyc_api.jobs import JobManager
 from kyc_api.webhooks import WebhookEvent
 
 from helpers import AUTH_HEADERS, FakeCoordinator, accept_document, settings
@@ -79,6 +82,40 @@ class _Comparison:
         return FaceComparisonResult(similarity=0.6487)
 
 
+class _InlineExecutor:
+    """A deterministic executor for lifecycle tests that do not test dispatch."""
+
+    def submit(self, function, *args, **kwargs) -> Future:
+        future = Future()
+        try:
+            future.set_result(function(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+
+class _QueuedExecutor:
+    def __init__(self) -> None:
+        self.tasks: list[tuple[Future, object, tuple, dict]] = []
+
+    def submit(self, function, *args, **kwargs) -> Future:
+        future = Future()
+        self.tasks.append((future, function, args, kwargs))
+        return future
+
+    def run_next(self) -> None:
+        future, function, args, kwargs = self.tasks.pop(0)
+        try:
+            future.set_result(function(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+
+
+class _RejectingExecutor:
+    def submit(self, *_args, **_kwargs) -> Future:
+        raise RuntimeError("private executor failure")
+
+
 class FaceMatchOrchestrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.artifacts = InMemoryPortraitArtifactStore()
@@ -87,6 +124,9 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
             max_sessions=4,
             portrait_artifacts=self.artifacts,
             face_match_enabled=True,
+        )
+        self.dispatcher = FaceMatchDispatcher(
+            workers=1, capacity=4, executor=_InlineExecutor()
         )
 
     def _document_passed(
@@ -136,6 +176,7 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         orchestrator = VerificationOrchestrator(
             store=self.store,
             face_comparison_service=comparison,  # type: ignore[arg-type]
+            dispatcher=self.dispatcher,
             snapshot_publisher=lambda snapshot, reason: events.append((reason, snapshot.event_sequence)),
         )
         document, document_artifact = self._document_passed(session_id)
@@ -182,7 +223,9 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         session_id = self.store.create().session_id
         comparison = _Comparison(error=FaceComparisonError("unavailable"))
         orchestrator = VerificationOrchestrator(
-            store=self.store, face_comparison_service=comparison  # type: ignore[arg-type]
+            store=self.store,
+            face_comparison_service=comparison,  # type: ignore[arg-type]
+            dispatcher=self.dispatcher,
         )
         document, document_artifact = self._document_passed(session_id)
         orchestrator.on_document_state_changed(document)
@@ -206,7 +249,9 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         comparison = _Comparison()
         comparison.block = True
         orchestrator = VerificationOrchestrator(
-            store=self.store, face_comparison_service=comparison  # type: ignore[arg-type]
+            store=self.store,
+            face_comparison_service=comparison,  # type: ignore[arg-type]
+            dispatcher=self.dispatcher,
         )
         first = threading.Thread(
             target=orchestrator.on_liveness_state_changed, args=(liveness,)
@@ -218,6 +263,232 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         first.join(timeout=1)
         self.assertEqual(1, comparison.calls)
         self.assertEqual(FaceMatchStatus.COMPLETED, self.store.get(session_id).face_match_status)
+
+    def test_document_callback_schedules_without_running_comparison_inline(self) -> None:
+        session_id = self.store.create().session_id
+        document, _ = self._document_passed(session_id)
+        self._liveness_passed(session_id)
+        comparison = _Comparison()
+        executor = _QueuedExecutor()
+        dispatcher = FaceMatchDispatcher(workers=1, capacity=4, executor=executor)
+        orchestrator = VerificationOrchestrator(
+            store=self.store,
+            face_comparison_service=comparison,  # type: ignore[arg-type]
+            dispatcher=dispatcher,
+        )
+
+        orchestrator.on_document_state_changed(document)
+
+        self.assertEqual(0, comparison.calls)
+        self.assertEqual(1, len(executor.tasks))
+        executor.run_next()
+        self.assertEqual(1, comparison.calls)
+
+    def test_liveness_first_document_trigger_automatically_matches(self) -> None:
+        session_id = self.store.create().session_id
+        accept_document(self.store, session_id)
+        liveness, _ = self._liveness_passed(session_id)
+        comparison = _Comparison()
+        orchestrator = VerificationOrchestrator(
+            store=self.store,
+            face_comparison_service=comparison,  # type: ignore[arg-type]
+            dispatcher=self.dispatcher,
+        )
+        orchestrator.on_liveness_state_changed(liveness)
+        document, _ = self._document_passed(session_id, captures_already_accepted=True)
+        orchestrator.on_document_state_changed(document)
+
+        self.assertEqual(1, comparison.calls)
+        self.assertEqual(FaceMatchStatus.COMPLETED, self.store.get(session_id).face_match_status)
+        self.assertEqual(VerificationStatus.COMPLETED, self.store.get(session_id).verification_status)
+
+    def test_distinct_scheduled_sessions_are_bounded_by_capacity(self) -> None:
+        executor = _QueuedExecutor()
+        dispatcher = FaceMatchDispatcher(workers=1, capacity=1, executor=executor)
+
+        self.assertTrue(dispatcher.schedule("first", lambda _session_id: None))
+        self.assertFalse(dispatcher.schedule("second", lambda _session_id: None))
+        self.assertEqual(1, len(executor.tasks))
+        executor.run_next()
+        self.assertTrue(dispatcher.schedule("second", lambda _session_id: None))
+
+    def test_ready_transition_during_active_attempt_runs_one_coalesced_follow_up(self) -> None:
+        session_id = self.store.create().session_id
+        document, _ = self._document_passed(session_id)
+        comparison = _Comparison()
+        first_attempt_finished_claim_check = threading.Event()
+        allow_first_attempt_to_exit = threading.Event()
+        verification_completed = threading.Event()
+        attempt_count = 0
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            dispatcher = FaceMatchDispatcher(workers=1, capacity=4, executor=executor)
+            orchestrator = VerificationOrchestrator(
+                store=self.store,
+                face_comparison_service=comparison,  # type: ignore[arg-type]
+                dispatcher=dispatcher,
+                snapshot_publisher=lambda _snapshot, reason: (
+                    verification_completed.set()
+                    if reason == "verification.completed"
+                    else None
+                ),
+            )
+            original_attempt = orchestrator.attempt_face_match
+
+            def gated_attempt(current_session_id: str):
+                nonlocal attempt_count
+                attempt_count += 1
+                result = original_attempt(current_session_id)
+                if attempt_count == 1:
+                    first_attempt_finished_claim_check.set()
+                    self.assertEqual(FaceMatchStatus.BLOCKED, self.store.get(session_id).face_match_status)
+                    self.assertTrue(allow_first_attempt_to_exit.wait(timeout=1))
+                return result
+
+            orchestrator.attempt_face_match = gated_attempt  # type: ignore[method-assign]
+            orchestrator.on_document_state_changed(document)
+            self.assertTrue(first_attempt_finished_claim_check.wait(timeout=1))
+            liveness, _ = self._liveness_passed(session_id)
+            orchestrator.on_liveness_state_changed(liveness)
+            allow_first_attempt_to_exit.set()
+            self.assertTrue(verification_completed.wait(timeout=1))
+            dispatcher.shutdown()
+
+        self.assertEqual(2, attempt_count)
+        self.assertEqual(1, comparison.calls)
+        self.assertEqual(FaceMatchStatus.COMPLETED, self.store.get(session_id).face_match_status)
+        self.assertEqual(VerificationStatus.COMPLETED, self.store.get(session_id).verification_status)
+
+    def test_scheduling_failure_leaves_ready_face_match_recoverable(self) -> None:
+        session_id = self.store.create().session_id
+        document, _ = self._document_passed(session_id)
+        self._liveness_passed(session_id)
+        comparison = _Comparison()
+        orchestrator = VerificationOrchestrator(
+            store=self.store,
+            face_comparison_service=comparison,  # type: ignore[arg-type]
+            dispatcher=FaceMatchDispatcher(workers=1, capacity=4, executor=_RejectingExecutor()),
+        )
+
+        orchestrator.on_document_state_changed(document)
+
+        self.assertEqual(0, comparison.calls)
+        self.assertEqual(FaceMatchStatus.READY, self.store.get(session_id).face_match_status)
+
+    def test_unexpected_task_failure_releases_session_for_later_trigger(self) -> None:
+        executor = _QueuedExecutor()
+        dispatcher = FaceMatchDispatcher(workers=1, capacity=1, executor=executor)
+        calls = 0
+
+        def flaky_attempt(_session_id: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("private failure")
+
+        self.assertTrue(dispatcher.schedule("session", flaky_attempt))
+        executor.run_next()
+        self.assertTrue(dispatcher.schedule("session", flaky_attempt))
+        executor.run_next()
+        self.assertEqual(2, calls)
+
+    def test_liveness_completion_returns_while_comparison_is_blocked(self) -> None:
+        session_id = self.store.create().session_id
+        self._document_passed(session_id)
+        comparison = _Comparison()
+        comparison.block = True
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            dispatcher = FaceMatchDispatcher(workers=1, capacity=4, executor=executor)
+            orchestrator = VerificationOrchestrator(
+                store=self.store,
+                face_comparison_service=comparison,  # type: ignore[arg-type]
+                dispatcher=dispatcher,
+            )
+            jobs = JobManager(FakeCoordinator(), self.store, workers=1, capacity=1)
+            manager = VerificationManager(
+                assessor=None,  # type: ignore[arg-type]
+                store=self.store,
+                jobs=jobs,
+                orchestrator=orchestrator,
+            )
+            try:
+                manager.start_liveness(session_id)
+                live_artifact = self.artifacts.put(np.ones((32, 32, 3), dtype=np.uint8))
+                completed = manager.complete_liveness(
+                    session_id,
+                    LivenessResult(True, 0.9, 3, 3),
+                    live_artifact,
+                    live_face_eligible=True,
+                )
+                self.assertIsNotNone(completed)
+                self.assertTrue(comparison.started.wait(timeout=1))
+                self.assertEqual(FaceMatchStatus.PROCESSING, self.store.get(session_id).face_match_status)
+            finally:
+                comparison.release.set()
+                dispatcher.shutdown()
+                jobs.shutdown()
+
+    def test_document_slot_and_job_metrics_finish_before_blocked_comparison(self) -> None:
+        first = self.store.create().session_id
+        second = self.store.create().session_id
+        accept_document(self.store, first)
+        accept_document(self.store, second)
+        document_artifact = self.artifacts.put(np.zeros((32, 32, 3), dtype=np.uint8))
+        live_artifact = self.artifacts.put(np.ones((32, 32, 3), dtype=np.uint8))
+        coordinator_started = threading.Event()
+        coordinator_release = threading.Event()
+        comparison = _Comparison()
+        comparison.block = True
+        metrics_recorded = threading.Event()
+
+        class _Metrics:
+            def record_job(self, *_args) -> None:
+                metrics_recorded.set()
+
+            def record_field_statuses(self, _result) -> None:
+                return None
+
+            def record_error(self, _code) -> None:
+                return None
+
+        coordinator = FakeCoordinator(started=coordinator_started, release=coordinator_release)
+        coordinator.output = _document_result(document_artifact)
+        with ThreadPoolExecutor(max_workers=1) as document_executor:
+            with ThreadPoolExecutor(max_workers=1) as face_executor:
+                dispatcher = FaceMatchDispatcher(
+                    workers=1, capacity=4, executor=face_executor
+                )
+                orchestrator = VerificationOrchestrator(
+                    store=self.store,
+                    face_comparison_service=comparison,  # type: ignore[arg-type]
+                    dispatcher=dispatcher,
+                )
+                jobs = JobManager(
+                    coordinator,
+                    self.store,
+                    workers=1,
+                    capacity=1,
+                    executor=document_executor,
+                    metrics=_Metrics(),  # type: ignore[arg-type]
+                    on_document_state_changed=orchestrator.on_document_state_changed,
+                )
+                try:
+                    jobs.submit_document_processing(first)
+                    self.assertTrue(coordinator_started.wait(timeout=1))
+                    self.store.start_liveness(first)
+                    self.store.complete_liveness(
+                        first, LivenessResult(True, 0.9, 3, 3), live_artifact, True
+                    )
+                    coordinator_release.set()
+                    self.assertTrue(comparison.started.wait(timeout=1))
+                    self.assertTrue(metrics_recorded.is_set())
+
+                    # The blocked comparison cannot retain the single document slot.
+                    second_job = jobs.submit_document_processing(second)
+                    self.assertEqual("queued", second_job.document.status.value)
+                finally:
+                    comparison.release.set()
+                    jobs.shutdown()
+                    dispatcher.shutdown()
 
     def test_disabled_matching_never_completes_verification(self) -> None:
         artifacts = InMemoryPortraitArtifactStore()
@@ -244,7 +515,9 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         liveness, _ = self._liveness_passed(session_id)
         comparison = _Comparison()
         orchestrator = VerificationOrchestrator(
-            store=self.store, face_comparison_service=comparison  # type: ignore[arg-type]
+            store=self.store,
+            face_comparison_service=comparison,  # type: ignore[arg-type]
+            dispatcher=self.dispatcher,
         )
         original_cleanup = self.store.release_face_match_biometric_artifacts
         cleanup_states: list[FaceMatchStatus] = []

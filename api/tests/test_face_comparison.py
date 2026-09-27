@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from fastapi.testclient import TestClient
 
 from kyc_engine import (
     FaceEmbedding,
@@ -158,6 +159,18 @@ class FaceComparisonServiceTests(unittest.TestCase):
                 self.assertEqual(200, client.get("/openapi.json").status_code)
                 self.assertNotIn("/v1/sessions/{session_id}/face-comparison", client.get("/openapi.json").json()["paths"])
         factory.assert_called_once_with(configured)
+
+    def test_lifespan_shuts_down_application_owned_face_dispatcher(self) -> None:
+        recognizer = _Recognizer([[1.0], [1.0]])
+        app = create_app(
+            settings=settings(), coordinator=FakeCoordinator(), face_recognizer=recognizer
+        )
+
+        with TestClient(app):
+            dispatcher = app.state.face_match_dispatcher
+
+        with self.assertRaises(RuntimeError):
+            dispatcher._executor.submit(lambda: None)
 
 
 if __name__ == "__main__":

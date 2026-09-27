@@ -113,6 +113,7 @@ class JobManager:
         started = perf_counter()
         timeout_timer: Timer | None = None
         result = None
+        post_document_callback: SessionSnapshot | None = None
         try:
             try:
                 front, back, running = self._store.start_document_processing(session_id, job_id)
@@ -154,8 +155,6 @@ class JobManager:
                     ProcessingStatus.FAILED: "document.failed",
                 }[result.status]
                 self._publish(completed, transition_reason)
-                if result.status == ProcessingStatus.SUCCESS:
-                    self._notify_document_state_changed(completed)
                 duration_ms = (perf_counter() - started) * 1000.0
                 self._metrics.record_job(
                     result.status.value,
@@ -170,6 +169,8 @@ class JobManager:
                         "duration_ms": round(duration_ms, 3),
                     },
                 )
+                if result.status == ProcessingStatus.SUCCESS:
+                    post_document_callback = completed
         except Exception as exc:
             if result is not None:
                 self._coordinator.release_pending_artifacts(result)
@@ -195,6 +196,8 @@ class JobManager:
             if timeout_timer is not None:
                 timeout_timer.cancel()
             self._slots.release()
+        if post_document_callback is not None:
+            self._notify_document_state_changed(post_document_callback)
 
     def _handle_timeout(self, session_id: str, job_id: str) -> None:
         with job_logging_context(session_id=session_id, job_id=job_id):

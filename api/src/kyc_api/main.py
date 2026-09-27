@@ -34,7 +34,7 @@ from .jobs import JobCapacityExceeded, JobManager
 from .face_comparison import FaceComparisonService
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
-from .orchestration import VerificationOrchestrator
+from .orchestration import FaceMatchDispatcher, VerificationOrchestrator
 from .middleware import (
     MetricsMiddleware,
     RequestBodyLimitMiddleware,
@@ -91,6 +91,7 @@ def create_app(
     face_recognizer: FaceRecognizer | None = None,
     session_store: SessionStore | None = None,
     executor: Executor | None = None,
+    face_match_executor: Executor | None = None,
     metrics: MetricsRegistry | None = None,
     rate_limiter: ApiKeyRateLimiter | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
@@ -100,6 +101,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         resolved_settings = settings or ApiSettings()  # type: ignore[call-arg]
+        face_match_dispatcher: FaceMatchDispatcher | None = None
         configure_logging(
             level=resolved_settings.log_level,
             environment=resolved_settings.environment,
@@ -173,6 +175,15 @@ def create_app(
                 if resolved_face_recognizer is not None
                 else None
             )
+            face_match_dispatcher = (
+                FaceMatchDispatcher(
+                    workers=resolved_settings.face_match_workers,
+                    capacity=resolved_settings.max_sessions,
+                    executor=face_match_executor,
+                )
+                if resolved_face_comparison is not None
+                else None
+            )
             resolved_rate_limiter = rate_limiter or ApiKeyRateLimiter(
                 max_requests=resolved_settings.rate_limit_requests,
                 window_seconds=resolved_settings.rate_limit_window_seconds,
@@ -195,6 +206,7 @@ def create_app(
                 VerificationOrchestrator(
                     store=resolved_store,
                     face_comparison_service=resolved_face_comparison,
+                    dispatcher=face_match_dispatcher,
                     snapshot_publisher=(
                         resolved_dispatcher.enqueue
                         if resolved_dispatcher is not None
@@ -243,6 +255,8 @@ def create_app(
                     },
                 )
         except Exception as exc:
+            if face_match_dispatcher is not None:
+                face_match_dispatcher.shutdown()
             logger.exception(
                 "application startup failed",
                 extra={
@@ -263,6 +277,7 @@ def create_app(
         application.state.metrics = resolved_metrics
         application.state.face_comparison = resolved_face_comparison
         application.state.orchestrator = orchestrator
+        application.state.face_match_dispatcher = face_match_dispatcher
         application.state.rate_limiter = resolved_rate_limiter
         application.state.webhook_dispatcher = resolved_dispatcher
         cleanup_stop = asyncio.Event()
@@ -282,6 +297,8 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await cleanup_task
             manager.shutdown()
+            if face_match_dispatcher is not None:
+                face_match_dispatcher.shutdown()
             if resolved_dispatcher is not None:
                 resolved_dispatcher.shutdown()
             telemetry_timeout_millis = round(

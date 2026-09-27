@@ -33,6 +33,7 @@ class ApiSettings(BaseSettings):
     face_recognition_enabled: bool = False
     face_recognition_model_root: Path | None = None
     face_recognition_model_id: str | None = None
+    face_match_workers: int = Field(default=1, gt=0)
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
     max_sessions: int = Field(default=100, gt=0)
     job_workers: int = Field(default=1, gt=0)
@@ -97,6 +98,12 @@ class ApiSettings(BaseSettings):
                 "KYC_FACE_RECOGNITION_MODEL_ROOT and KYC_FACE_RECOGNITION_MODEL_ID "
                 "are required when KYC_FACE_RECOGNITION_ENABLED is true"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_face_match_worker_configuration(self) -> "ApiSettings":
+        if self.face_match_workers > self.max_sessions:
+            raise ValueError("KYC_FACE_MATCH_WORKERS must not exceed KYC_MAX_SESSIONS")
         return self
 
     @model_validator(mode="after")

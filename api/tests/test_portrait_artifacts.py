@@ -15,6 +15,7 @@ from kyc_engine import (
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 from helpers import PNG_BYTES, accept_document
+from kyc_api.models import VerificationStatus
 from kyc_api.sessions import SessionStore, _now
 
 
@@ -76,8 +77,23 @@ class PortraitArtifactSessionTests(unittest.TestCase):
         )
         self.assertIsNotNone(completed)
         self.assertIsNotNone(self.store.resolve_portrait_artifact(session_id))
+        self.assertIsNone(self.store.resolve_face_match_portrait(session_id))
         self.store.delete(session_id)
         self.assertFalse(self.artifacts.exists(artifact_id))
+
+    def test_matcher_resolver_requires_eligibility_and_an_active_session(self) -> None:
+        session_id, job_id = self._start()
+        artifact_id = self._pending()
+        self.assertIsNotNone(
+            self.store.complete_document_processing(session_id, job_id, _result(artifact_id))
+        )
+        portrait = self.store.resolve_face_match_portrait(session_id)
+        self.assertIsNotNone(portrait)
+        assert portrait is not None
+        self.assertFalse(portrait.flags.writeable)
+
+        self.store._records[session_id].status = VerificationStatus.REJECTED
+        self.assertIsNone(self.store.resolve_face_match_portrait(session_id))
 
     def test_expiry_releases_claimed_artifact(self) -> None:
         session_id, job_id = self._start()

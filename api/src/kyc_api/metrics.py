@@ -35,6 +35,7 @@ _KNOWN_STAGE_NAMES = frozenset(
         "reconciliation",
     }
 )
+_FACE_COMPARISON_STAGES = frozenset({"reference", "probe", "comparison"})
 
 @dataclass
 class _Latency:
@@ -99,6 +100,15 @@ class MetricsRegistry:
             "kyc.field.status",
             description="Final KYC extracted-field statuses",
         )
+        self._face_comparison_stage_counter = meter.create_counter(
+            "kyc.face_comparison.stages",
+            description="Internal face-comparison stages by safe outcome",
+        )
+        self._face_comparison_duration = meter.create_histogram(
+            "kyc.face_comparison.duration",
+            unit="s",
+            description="Internal face-comparison stage duration",
+        )
 
     def record_response(self, status_code: int, duration_ms: float) -> None:
         with self._lock:
@@ -158,6 +168,21 @@ class MetricsRegistry:
                     "status": field.status.value,
                 }
                 self._record_otel(lambda: self._field_status_counter.add(1, attributes))
+
+    def record_face_comparison(
+        self, *, stage: str, status: str, duration_seconds: float
+    ) -> None:
+        """Record only bounded stage/outcome telemetry; never biometric values."""
+        attributes = {
+            "stage": stage if stage in _FACE_COMPARISON_STAGES else "unknown",
+            "status": status if status in {"success", "failed"} else "unknown",
+        }
+        self._record_otel(lambda: self._face_comparison_stage_counter.add(1, attributes))
+        self._record_otel(
+            lambda: self._face_comparison_duration.record(
+                max(0.0, duration_seconds), attributes
+            )
+        )
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:

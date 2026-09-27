@@ -3,9 +3,13 @@ from unittest.mock import patch
 
 from pathlib import Path
 
-from kyc_engine import IntakeLimits, MiniFASNetInitializationError
+from kyc_engine import (
+    FaceRecognitionInitializationError,
+    IntakeLimits,
+    MiniFASNetInitializationError,
+)
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
-from kyc_api.composition import create_coordinator, create_liveness_evaluator
+from kyc_api.composition import create_coordinator, create_face_recognizer, create_liveness_evaluator
 
 from helpers import FakeCoordinator, settings
 
@@ -60,6 +64,34 @@ class ApiCompositionTests(unittest.TestCase):
         )
         with self.assertRaises(MiniFASNetInitializationError):
             create_liveness_evaluator(configured)
+
+    @patch("kyc_api.composition.InsightFaceRecognizer")
+    def test_face_recognition_is_optional_and_uses_explicit_local_configuration(
+        self, recognizer_class
+    ) -> None:
+        self.assertIsNone(create_face_recognizer(settings()))
+        configured = settings(
+            face_recognition_enabled=True,
+            face_recognition_model_root=Path("private-models/recognition"),
+            face_recognition_model_id="development-pack",
+        )
+
+        recognizer = create_face_recognizer(configured)
+
+        self.assertIs(recognizer_class.return_value, recognizer)
+        recognizer_class.assert_called_once_with(
+            configured.face_recognition_model_root,
+            configured.face_recognition_model_id,
+        )
+
+    def test_enabled_face_recognition_missing_models_fails_during_composition(self) -> None:
+        configured = settings(
+            face_recognition_enabled=True,
+            face_recognition_model_root=Path("missing-private-recognition-models"),
+            face_recognition_model_id="development-pack",
+        )
+        with self.assertRaises(FaceRecognitionInitializationError):
+            create_face_recognizer(configured)
 
 
 if __name__ == "__main__":

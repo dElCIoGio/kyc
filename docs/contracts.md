@@ -71,6 +71,25 @@ embeddings are never represented in API JSON. The internal
 `resolve_live_face_artifact` boundary returns the selected original frame only
 when liveness passed.
 
+## Internal Face Comparison
+
+Face comparison is an internal-only, model-agnostic boundary. It resolves only
+the matcher-eligible document portrait and the passed liveness frame, requires
+exactly one face from each recognition inference, and returns only a raw finite
+cosine similarity. It has no threshold, match decision, API endpoint, session
+state transition, or embedding persistence. Embeddings exist only during one
+comparison call and are excluded from logs, tracing, metrics, artifacts, and
+serialized responses.
+
+The optional InsightFace adapter uses its own `FaceAnalysis` detection,
+landmarks, alignment, and recognition pipeline, with local CPU ONNX Runtime
+models provisioned through `KYC_FACE_RECOGNITION_MODEL_ROOT` and the safe
+`KYC_FACE_RECOGNITION_MODEL_ID` when `KYC_FACE_RECOGNITION_ENABLED` is true.
+Automatic model downloads are disabled. InsightFace pretrained model packs are
+development/test-only for this project unless commercial-use rights for the
+exact weights are confirmed separately; model weights must not be committed to
+this repository.
+
 ## Profile Contracts
 
 - `DocumentProfile`: profile identity, document type/side, canonical dimensions, review status, ordered fields, and an optional QR region.

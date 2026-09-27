@@ -4,7 +4,7 @@
 
 The core processes exactly one `ao_id_card/front/v1` document in memory and returns text fields. It is a modular monolith: stage responsibilities are separate, while orchestration remains one synchronous Python call.
 
-Authenticity, forgery detection, face matching, final biometric decisions, storage, queues, HTTP APIs, frontends, and multi-card selection are outside this core.
+Authenticity, forgery detection, thresholded face matching, final biometric decisions, storage, queues, HTTP APIs, frontends, and multi-card selection are outside this core.
 
 ## Processing Stages
 
@@ -109,6 +109,9 @@ After both document captures are accepted, document processing and liveness can
 advance independently. The API accepts a bounded, configured number of
 ephemeral JPEG/PNG liveness frames; it persists only the safe aggregate
 `LivenessResult`, never source frames, crops, tensors, or reference images.
-Face matching remains blocked, and neither document nor liveness success marks
-the verification final. The passive policy is an initial uncalibrated
-development default.
+When explicitly configured, an internal local recognizer may derive a raw
+cosine similarity from the two eligibility-gated artifacts. It does not expose
+an endpoint, apply a threshold, change `FaceMatchStatus`, or make a verification
+decision; those face-matching actions remain blocked. Neither document nor
+liveness success marks the verification final. The passive policy is an initial
+uncalibrated development default.

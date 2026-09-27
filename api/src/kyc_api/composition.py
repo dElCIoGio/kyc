@@ -10,6 +10,8 @@ from kyc_engine import (
     IntakeLimits,
     LivenessEvaluationConfig,
     LivenessEvaluator,
+    FaceRecognizer,
+    InsightFaceRecognizer,
     MiniFASNetAntiSpoofDetector,
     OpenCVHaarFaceDetector,
     build_paddle_document_coordinator,
@@ -65,6 +67,18 @@ def create_liveness_evaluator(settings: ApiSettings) -> LivenessEvaluator | None
 
 def create_liveness_intake(settings: ApiSettings) -> ImageIntake:
     return ImageIntake(IntakeLimits(max_encoded_bytes=settings.max_liveness_frame_bytes))
+
+
+def create_face_recognizer(settings: ApiSettings) -> FaceRecognizer | None:
+    """Build the optional local recognition dependency graph once at startup."""
+    if not settings.face_recognition_enabled:
+        return None
+    assert settings.face_recognition_model_root is not None
+    assert settings.face_recognition_model_id is not None
+    return InsightFaceRecognizer(
+        settings.face_recognition_model_root,
+        settings.face_recognition_model_id,
+    )
 
 
 @contextmanager

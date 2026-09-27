@@ -15,6 +15,7 @@ from kyc_engine import (
 from kyc_engine.intake import ImageIntake, IntakeError
 
 from .jobs import JobCapacityExceeded, JobManager
+from .face_comparison import FaceComparisonService
 from .models import DocumentSide, DocumentStatus, LivenessStatus
 from .sessions import SessionConflict, SessionSnapshot, SessionStore
 
@@ -72,6 +73,7 @@ class VerificationManager:
         jobs: JobManager,
         liveness_evaluator: LivenessEvaluator | None = None,
         liveness_intake: ImageIntake | None = None,
+        face_comparison_service: FaceComparisonService | None = None,
         snapshot_publisher: Callable[[SessionSnapshot, str], None] | None = None,
     ) -> None:
         self._assessor = assessor
@@ -79,6 +81,7 @@ class VerificationManager:
         self._jobs = jobs
         self._liveness_evaluator = liveness_evaluator
         self._liveness_intake = liveness_intake
+        self._face_comparison_service = face_comparison_service
         self._snapshot_publisher = snapshot_publisher
 
     def submit_document_capture(
@@ -137,6 +140,12 @@ class VerificationManager:
         self._publish(snapshot, "liveness.started")
         logger.info("liveness started", extra={"event": "liveness.started"})
         return snapshot
+
+    def compare_faces(self, session_id: str):
+        """Internal-only future matcher entry point; no HTTP route calls this."""
+        if self._face_comparison_service is None:
+            raise RuntimeError("Face recognition is not configured")
+        return self._face_comparison_service.compare(session_id)
 
     @property
     def liveness_frame_count(self) -> int:

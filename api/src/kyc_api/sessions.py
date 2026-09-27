@@ -408,6 +408,22 @@ class SessionStore:
                 return None
             return self.portrait_artifacts.get(portrait.artifact_id, session_id=session_id)
 
+    def resolve_face_match_portrait(self, session_id: str) -> Image | None:
+        """Return the document portrait only when it is matcher-eligible."""
+        with self._lock:
+            record = self._get_record(session_id)
+            result = record.document.result
+            portrait = result.front.portrait if result is not None and result.front is not None else None
+            if (
+                record.status != VerificationStatus.IN_PROGRESS
+                or portrait is None
+                or not portrait.eligible_for_face_match
+                or portrait.artifact_id is None
+                or self.portrait_artifacts is None
+            ):
+                return None
+            return self.portrait_artifacts.get(portrait.artifact_id, session_id=session_id)
+
     def resolve_live_face_artifact(self, session_id: str) -> Image | None:
         """Internal-only future matcher boundary for the retained live face."""
         with self._lock:

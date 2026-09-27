@@ -410,6 +410,67 @@ class FaceDetector(Protocol):
 
 
 @dataclass(frozen=True)
+class FaceEmbedding:
+    """Internal-only face-recognition vector; never an API or storage contract."""
+
+    vector: NDArray[np.float64]
+
+    def __post_init__(self) -> None:
+        vector = np.array(self.vector, dtype=np.float64, copy=True, order="C")
+        if vector.ndim != 1:
+            raise ValueError("Face embedding must be a one-dimensional vector")
+        vector.setflags(write=False)
+        object.__setattr__(self, "vector", vector)
+
+
+@dataclass(frozen=True)
+class FaceRecognitionResult:
+    """One successful recognition result for exactly one detected face."""
+
+    embedding: FaceEmbedding
+    face_count: int
+    detection_confidence: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.face_count != 1:
+            raise ValueError("Successful face recognition requires exactly one face")
+        if self.detection_confidence is not None:
+            if (
+                isinstance(self.detection_confidence, bool)
+                or not isinstance(self.detection_confidence, (int, float))
+                or not isfinite(self.detection_confidence)
+                or not 0.0 <= self.detection_confidence <= 1.0
+            ):
+                raise ValueError("Face detection confidence must be finite and between 0 and 1")
+            object.__setattr__(self, "detection_confidence", float(self.detection_confidence))
+
+
+class FaceRecognizer(Protocol):
+    """Recognition boundary that owns detection, alignment, and embedding."""
+
+    provider_name: str
+    model_id: str
+
+    def encode(self, image: Image) -> FaceRecognitionResult: ...
+
+
+@dataclass(frozen=True)
+class FaceComparisonResult:
+    """Internal raw cosine similarity, with no decision or threshold semantics."""
+
+    similarity: float
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.similarity, bool)
+            or not isinstance(self.similarity, (int, float))
+            or not isfinite(self.similarity)
+        ):
+            raise ValueError("Face comparison similarity must be finite")
+        object.__setattr__(self, "similarity", float(self.similarity))
+
+
+@dataclass(frozen=True)
 class PortraitExtractionResult:
     """Internal portrait state. Artifact IDs and biometric details never serialize."""
 

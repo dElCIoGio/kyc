@@ -30,6 +30,9 @@ class ApiSettings(BaseSettings):
     liveness_frame_count: int = Field(default=3, gt=0)
     liveness_min_real_ratio: float = Field(default=2.0 / 3.0, gt=0.0, le=1.0)
     max_liveness_frame_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    face_recognition_enabled: bool = False
+    face_recognition_model_root: Path | None = None
+    face_recognition_model_id: str | None = None
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
     max_sessions: int = Field(default=100, gt=0)
     job_workers: int = Field(default=1, gt=0)
@@ -83,6 +86,17 @@ class ApiSettings(BaseSettings):
     def validate_liveness_configuration(self) -> "ApiSettings":
         if self.liveness_enabled and self.liveness_model_root is None:
             raise ValueError("KYC_LIVENESS_MODEL_ROOT is required when KYC_LIVENESS_ENABLED is true")
+        return self
+
+    @model_validator(mode="after")
+    def validate_face_recognition_configuration(self) -> "ApiSettings":
+        if not self.face_recognition_enabled:
+            return self
+        if self.face_recognition_model_root is None or self.face_recognition_model_id is None:
+            raise ValueError(
+                "KYC_FACE_RECOGNITION_MODEL_ROOT and KYC_FACE_RECOGNITION_MODEL_ID "
+                "are required when KYC_FACE_RECOGNITION_ENABLED is true"
+            )
         return self
 
     @model_validator(mode="after")

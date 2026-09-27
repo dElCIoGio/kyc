@@ -23,6 +23,10 @@ ocr = [
 ]
 detection = ["onnxruntime>=1.20,<2"]
 liveness = ["torch>=2.4,<3"]
+recognition = [
+    "insightface>=2.0,<3",
+    "onnxruntime>=1.30,<2",
+]
 dev = []
 
 [tool.setuptools.packages.find]

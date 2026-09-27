@@ -18,8 +18,12 @@ from .contracts import (
     FieldDefinition,
     FieldStatus,
     FaceCandidate,
+    FaceComparisonResult,
     FaceDetectionResult,
     FaceDetector,
+    FaceEmbedding,
+    FaceRecognitionResult,
+    FaceRecognizer,
     ImageSource,
     InputImage,
     KycExtractionResult,
@@ -52,6 +56,14 @@ from .minifasnet import (
     MiniFASNetInputError,
     MiniFASNetNoFaceError,
 )
+from .face_recognition import (
+    FaceRecognitionError,
+    FaceRecognitionInferenceError,
+    FaceRecognitionInitializationError,
+    FaceRecognitionMultipleFacesError,
+    FaceRecognitionNoFaceError,
+)
+from .insightface_recognition import InsightFaceRecognizer
 from .intake import IntakeLimits
 from .pipeline import KycPipeline
 from .coordinator import DocumentCoordinator, DocumentExtractionResult
@@ -78,8 +90,17 @@ __all__ = [
     "FieldDefinition",
     "FieldStatus",
     "FaceCandidate",
+    "FaceComparisonResult",
     "FaceDetectionResult",
     "FaceDetector",
+    "FaceEmbedding",
+    "FaceRecognitionResult",
+    "FaceRecognizer",
+    "FaceRecognitionError",
+    "FaceRecognitionInferenceError",
+    "FaceRecognitionInitializationError",
+    "FaceRecognitionMultipleFacesError",
+    "FaceRecognitionNoFaceError",
     "ImageSource",
     "InputImage",
     "IntakeLimits",
@@ -122,4 +143,5 @@ __all__ = [
     "TextRecognizer",
     "OpenCVHaarFaceDetector",
     "InMemoryPortraitArtifactStore",
+    "InsightFaceRecognizer",
 ]

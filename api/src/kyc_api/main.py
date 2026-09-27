@@ -11,7 +11,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.formparsers import MultiPartParser
 
-from kyc_engine import CaptureAssessmentInputError, DocumentCaptureAssessor, DocumentCoordinator, LivenessEvaluator
+from kyc_engine import (
+    CaptureAssessmentInputError,
+    DocumentCaptureAssessor,
+    DocumentCoordinator,
+    FaceRecognizer,
+    LivenessEvaluator,
+)
 from kyc_engine.intake import ImageIntake
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
@@ -20,10 +26,12 @@ from .auth import require_api_key
 from .composition import (
     create_capture_assessor,
     create_coordinator,
+    create_face_recognizer,
     create_liveness_evaluator,
     create_liveness_intake,
 )
 from .jobs import JobCapacityExceeded, JobManager
+from .face_comparison import FaceComparisonService
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
 from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware, RequestContextMiddleware
@@ -75,6 +83,7 @@ def create_app(
     capture_assessor: DocumentCaptureAssessor | None = None,
     liveness_evaluator: LivenessEvaluator | None = None,
     liveness_intake: ImageIntake | None = None,
+    face_recognizer: FaceRecognizer | None = None,
     session_store: SessionStore | None = None,
     executor: Executor | None = None,
     metrics: MetricsRegistry | None = None,
@@ -143,6 +152,18 @@ def create_app(
                 resolved_settings
             )
             resolved_metrics = metrics or MetricsRegistry()
+            resolved_face_recognizer = face_recognizer or create_face_recognizer(
+                resolved_settings
+            )
+            resolved_face_comparison = (
+                FaceComparisonService(
+                    session_store=resolved_store,
+                    recognizer=resolved_face_recognizer,
+                    metrics=resolved_metrics,
+                )
+                if resolved_face_recognizer is not None
+                else None
+            )
             resolved_rate_limiter = rate_limiter or ApiKeyRateLimiter(
                 max_requests=resolved_settings.rate_limit_requests,
                 window_seconds=resolved_settings.rate_limit_window_seconds,
@@ -177,6 +198,7 @@ def create_app(
                 jobs=manager,
                 liveness_evaluator=resolved_liveness_evaluator,
                 liveness_intake=resolved_liveness_intake,
+                face_comparison_service=resolved_face_comparison,
                 snapshot_publisher=(
                     resolved_dispatcher.enqueue if resolved_dispatcher is not None else None
                 ),
@@ -208,6 +230,7 @@ def create_app(
         application.state.jobs = manager
         application.state.verifications = verification_manager
         application.state.metrics = resolved_metrics
+        application.state.face_comparison = resolved_face_comparison
         application.state.rate_limiter = resolved_rate_limiter
         application.state.webhook_dispatcher = resolved_dispatcher
         cleanup_stop = asyncio.Event()

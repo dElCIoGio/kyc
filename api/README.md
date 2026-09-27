@@ -246,8 +246,15 @@ The response contains only aggregate `passed`, `passive_score`,
 `frames_evaluated`, and `real_frames` values. MiniFASNet passive liveness and
 the three-frame/two-real policy are initial uncalibrated development defaults;
 they are not a complete production biometric-verification decision. Document
-processing and liveness progress independently after document capture. Face
-matching and final `verified` decisions remain unimplemented.
+processing and liveness progress independently after document capture. When the
+optional local development recognizer is configured, an eligible document
+portrait and selected live frame automatically run one internal face-match
+comparison after both checks pass. The session reports only face-match lifecycle
+state; the authenticated result response appends a `face_match` object with the
+raw `similarity` only after completion. That score is uncalibrated development
+metadata, not a thresholded match, acceptance, rejection, or `verified`
+decision. When recognition is not configured, face matching remains `blocked`
+and verification remains `in_progress`.
 
 `POST /v1/sessions/SESSION_ID/process` remains available as a safe retry if a
 completed capture is left `ready` because bounded job capacity was unavailable.

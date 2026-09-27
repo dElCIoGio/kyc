@@ -109,9 +109,14 @@ After both document captures are accepted, document processing and liveness can
 advance independently. The API accepts a bounded, configured number of
 ephemeral JPEG/PNG liveness frames; it persists only the safe aggregate
 `LivenessResult`, never source frames, crops, tensors, or reference images.
-When explicitly configured, an internal local recognizer may derive a raw
-cosine similarity from the two eligibility-gated artifacts. It does not expose
-an endpoint, apply a threshold, change `FaceMatchStatus`, or make a verification
-decision; those face-matching actions remain blocked. Neither document nor
-liveness success marks the verification final. The passive policy is an initial
-uncalibrated development default.
+When explicitly configured, an internal local recognizer automatically derives
+a raw cosine similarity from the two eligibility-gated artifacts after document
+and liveness pass. A locked lifecycle advances face matching through `ready`,
+`processing`, and `completed` (or `failed`), then releases both biometric
+artifacts. The score is ephemeral session metadata exposed only by the
+authenticated result response; it is uncalibrated and does not apply a
+threshold, make an identity decision, or transition a verification to
+`verified`/`rejected`. A verification becomes `completed` only after all three
+configured checks complete successfully. Without a configured recognizer, face
+matching stays blocked and verification stays in progress. The passive policy
+is an initial uncalibrated development default.

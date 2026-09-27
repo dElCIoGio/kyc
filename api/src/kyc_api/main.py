@@ -34,7 +34,12 @@ from .jobs import JobCapacityExceeded, JobManager
 from .face_comparison import FaceComparisonService
 from .logging import configure_logging, logging_context
 from .metrics import MetricsRegistry
-from .middleware import MetricsMiddleware, RequestBodyLimitMiddleware, RequestContextMiddleware
+from .orchestration import VerificationOrchestrator
+from .middleware import (
+    MetricsMiddleware,
+    RequestBodyLimitMiddleware,
+    RequestContextMiddleware,
+)
 from .telemetry import (
     build_otlp_export_configuration,
     configure_metrics,
@@ -91,6 +96,7 @@ def create_app(
     webhook_dispatcher: WebhookDispatcher | None = None,
     portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
 ) -> FastAPI:
+
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         resolved_settings = settings or ApiSettings()  # type: ignore[call-arg]
@@ -129,13 +135,19 @@ def create_app(
                 or getattr(coordinator, "portrait_artifacts", None)
                 or getattr(session_store, "portrait_artifacts", None)
                 or InMemoryPortraitArtifactStore(
-                    pending_ttl_seconds=max(60.0, resolved_settings.job_timeout_seconds + 5.0)
+                    pending_ttl_seconds=max(
+                        60.0, resolved_settings.job_timeout_seconds + 5.0
+                    )
                 )
+            )
+            resolved_face_recognizer = face_recognizer or create_face_recognizer(
+                resolved_settings
             )
             resolved_store = session_store or SessionStore(
                 ttl_seconds=resolved_settings.session_ttl_seconds,
                 max_sessions=resolved_settings.max_sessions,
                 portrait_artifacts=resolved_artifacts,
+                face_match_enabled=resolved_face_recognizer is not None,
             )
             resolved_coordinator = coordinator or create_coordinator(
                 resolved_settings, portrait_artifacts=resolved_artifacts
@@ -152,9 +164,6 @@ def create_app(
                 resolved_settings
             )
             resolved_metrics = metrics or MetricsRegistry()
-            resolved_face_recognizer = face_recognizer or create_face_recognizer(
-                resolved_settings
-            )
             resolved_face_comparison = (
                 FaceComparisonService(
                     session_store=resolved_store,
@@ -182,6 +191,19 @@ def create_app(
                     timeout_seconds=resolved_settings.webhook_timeout_seconds,
                 )
                 resolved_dispatcher.start()
+            orchestrator = (
+                VerificationOrchestrator(
+                    store=resolved_store,
+                    face_comparison_service=resolved_face_comparison,
+                    snapshot_publisher=(
+                        resolved_dispatcher.enqueue
+                        if resolved_dispatcher is not None
+                        else None
+                    ),
+                )
+                if resolved_face_comparison is not None
+                else None
+            )
             manager = JobManager(
                 resolved_coordinator,
                 resolved_store,
@@ -190,7 +212,14 @@ def create_app(
                 timeout_seconds=resolved_settings.job_timeout_seconds,
                 metrics=resolved_metrics,
                 executor=executor,
-                webhook_publisher=resolved_dispatcher.enqueue if resolved_dispatcher is not None else None,
+                webhook_publisher=resolved_dispatcher.enqueue
+                if resolved_dispatcher is not None
+                else None,
+                on_document_state_changed=(
+                    orchestrator.on_document_state_changed
+                    if orchestrator is not None
+                    else None
+                ),
             )
             verification_manager = VerificationManager(
                 assessor=resolved_capture_assessor,
@@ -198,9 +227,11 @@ def create_app(
                 jobs=manager,
                 liveness_evaluator=resolved_liveness_evaluator,
                 liveness_intake=resolved_liveness_intake,
-                face_comparison_service=resolved_face_comparison,
+                orchestrator=orchestrator,
                 snapshot_publisher=(
-                    resolved_dispatcher.enqueue if resolved_dispatcher is not None else None
+                    resolved_dispatcher.enqueue
+                    if resolved_dispatcher is not None
+                    else None
                 ),
             )
             if telemetry_export is not None:
@@ -231,6 +262,7 @@ def create_app(
         application.state.verifications = verification_manager
         application.state.metrics = resolved_metrics
         application.state.face_comparison = resolved_face_comparison
+        application.state.orchestrator = orchestrator
         application.state.rate_limiter = resolved_rate_limiter
         application.state.webhook_dispatcher = resolved_dispatcher
         cleanup_stop = asyncio.Event()
@@ -276,7 +308,6 @@ def create_app(
     )
     application.add_middleware(RequestContextMiddleware)
     _install_error_handlers(application)
-
     @application.get("/healthz", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(version=__version__)
@@ -288,7 +319,9 @@ def create_app(
         responses={401: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
     )
     def get_metrics(request: Request) -> MetricsResponse:
-        return MetricsResponse(version=__version__, **request.app.state.metrics.snapshot())
+        return MetricsResponse(
+            version=__version__, **request.app.state.metrics.snapshot()
+        )
 
     @application.post(
         "/v1/sessions",
@@ -326,9 +359,15 @@ def create_app(
             finally:
                 await image.close()
             if len(content) > limit:
-                raise _problem(413, "UPLOAD_TOO_LARGE", "Uploaded image exceeds the size limit")
+                raise _problem(
+                    413, "UPLOAD_TOO_LARGE", "Uploaded image exceeds the size limit"
+                )
             if not content or not _has_supported_signature(content, image.content_type):
-                raise _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
+                raise _problem(
+                    415,
+                    "UNSUPPORTED_IMAGE",
+                    "Uploaded content is not a supported image",
+                )
 
             try:
                 submission = request.app.state.verifications.submit_document_capture(
@@ -371,22 +410,38 @@ def create_app(
             try:
                 expected_frames = request.app.state.verifications.liveness_frame_count
                 if len(frames) != expected_frames:
-                    raise _problem(422, "LIVENESS_FRAME_COUNT", "Incorrect number of liveness frames")
+                    raise _problem(
+                        422,
+                        "LIVENESS_FRAME_COUNT",
+                        "Incorrect number of liveness frames",
+                    )
                 content = []
                 limit = request.app.state.settings.max_liveness_frame_bytes
                 for frame in frames:
                     _validate_upload_metadata(frame)
                     data = await frame.read(limit + 1)
                     if len(data) > limit:
-                        raise _problem(413, "UPLOAD_TOO_LARGE", "Uploaded image exceeds the size limit")
-                    if not data or not _has_supported_signature(data, frame.content_type):
-                        raise _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
+                        raise _problem(
+                            413,
+                            "UPLOAD_TOO_LARGE",
+                            "Uploaded image exceeds the size limit",
+                        )
+                    if not data or not _has_supported_signature(
+                        data, frame.content_type
+                    ):
+                        raise _problem(
+                            415,
+                            "UNSUPPORTED_IMAGE",
+                            "Uploaded content is not a supported image",
+                        )
                     content.append(data)
             finally:
                 for frame in frames:
                     await frame.close()
 
-            submission = request.app.state.verifications.submit_liveness(session_id, content)
+            submission = request.app.state.verifications.submit_liveness(
+                session_id, content
+            )
             return LivenessSubmissionResponse(
                 session_id=submission.snapshot.session_id,
                 liveness=LivenessResponse(
@@ -412,9 +467,14 @@ def create_app(
     )
     def process_session(session_id: str, request: Request) -> JobStatusResponse:
         with _session_logging_context(request, session_id):
-            snapshot = request.app.state.verifications.start_document_processing(session_id)
+            snapshot = request.app.state.verifications.start_document_processing(
+                session_id
+            )
             with logging_context(job_id=snapshot.document.job_id):
-                logger.info("document processing queued", extra={"event": "document.processing_queued"})
+                logger.info(
+                    "document processing queued",
+                    extra={"event": "document.processing_queued"},
+                )
             return JobStatusResponse(
                 session_id=snapshot.session_id,
                 job_id=snapshot.document.job_id,
@@ -444,7 +504,12 @@ def create_app(
     def get_result(session_id: str, request: Request) -> JSONResponse:
         with _session_logging_context(request, session_id):
             result = request.app.state.sessions.result(session_id)
-            return JSONResponse(content=result.to_dict())
+            face_match = request.app.state.sessions.face_match_result(session_id)
+            payload = result.to_dict()
+            payload["face_match"] = {"status": face_match.status.value}
+            if face_match.similarity is not None:
+                payload["face_match"]["similarity"] = face_match.similarity
+            return JSONResponse(content=payload)
 
     @application.delete(
         "/v1/sessions/{session_id}",
@@ -481,12 +546,21 @@ def _session_response(snapshot: SessionSnapshot) -> SessionResponse:
 
 def _validate_upload_metadata(image: UploadFile) -> None:
     suffix = Path(image.filename or "").suffix.lower()
-    if image.content_type not in _ALLOWED_CONTENT_TYPES or suffix not in _ALLOWED_SUFFIXES:
-        raise _problem(415, "UNSUPPORTED_IMAGE", "Only JPEG and PNG uploads are supported")
+    if (
+        image.content_type not in _ALLOWED_CONTENT_TYPES
+        or suffix not in _ALLOWED_SUFFIXES
+    ):
+        raise _problem(
+            415, "UNSUPPORTED_IMAGE", "Only JPEG and PNG uploads are supported"
+        )
     if image.content_type == "image/png" and suffix != ".png":
-        raise _problem(415, "UNSUPPORTED_IMAGE", "Image type and extension do not match")
+        raise _problem(
+            415, "UNSUPPORTED_IMAGE", "Image type and extension do not match"
+        )
     if image.content_type == "image/jpeg" and suffix not in {".jpg", ".jpeg"}:
-        raise _problem(415, "UNSUPPORTED_IMAGE", "Image type and extension do not match")
+        raise _problem(
+            415, "UNSUPPORTED_IMAGE", "Image type and extension do not match"
+        )
 
 
 def _has_supported_signature(content: bytes, content_type: str | None) -> bool:
@@ -506,9 +580,13 @@ def _problem(status_code: int, code: str, message: str) -> HTTPException:
 
 def _capture_input_problem(code: str) -> HTTPException:
     if code in {"INPUT_TOO_LARGE", "IMAGE_TOO_LARGE"}:
-        return _problem(413, "IMAGE_TOO_LARGE", "Uploaded image exceeds the supported limits")
+        return _problem(
+            413, "IMAGE_TOO_LARGE", "Uploaded image exceeds the supported limits"
+        )
     if code in {"DECODE_FAILED", "UNSUPPORTED_FORMAT"}:
-        return _problem(415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image")
+        return _problem(
+            415, "UNSUPPORTED_IMAGE", "Uploaded content is not a supported image"
+        )
     return _problem(422, "INVALID_IMAGE", "Uploaded image is invalid")
 
 
@@ -533,14 +611,22 @@ def _install_error_handlers(application: FastAPI) -> None:
     ) -> JSONResponse:
         _record_error(request, "INVALID_REQUEST")
         return _error_response(
-            422, "INVALID_REQUEST", "The request is invalid", request_id=_request_id(request)
+            422,
+            "INVALID_REQUEST",
+            "The request is invalid",
+            request_id=_request_id(request),
         )
 
     @application.exception_handler(SessionNotFound)
-    async def session_not_found(request: Request, _exc: SessionNotFound) -> JSONResponse:
+    async def session_not_found(
+        request: Request, _exc: SessionNotFound
+    ) -> JSONResponse:
         _record_error(request, "SESSION_NOT_FOUND")
         return _error_response(
-            404, "SESSION_NOT_FOUND", "Session was not found", request_id=_request_id(request)
+            404,
+            "SESSION_NOT_FOUND",
+            "Session was not found",
+            request_id=_request_id(request),
         )
 
     @application.exception_handler(SessionConflict)
@@ -586,7 +672,10 @@ def _install_error_handlers(application: FastAPI) -> None:
     async def session_error(request: Request, _exc: SessionStoreError) -> JSONResponse:
         _record_error(request, "JOB_FAILED")
         return _error_response(
-            500, "JOB_FAILED", "Document extraction failed", request_id=_request_id(request)
+            500,
+            "JOB_FAILED",
+            "Document extraction failed",
+            request_id=_request_id(request),
         )
 
     @application.exception_handler(Exception)

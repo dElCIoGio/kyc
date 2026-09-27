@@ -39,6 +39,7 @@ class JobManager:
         executor: Executor | None = None,
         timer_factory: Callable[[float, Callable[[], None]], Timer] = Timer,
         webhook_publisher: Callable[[SessionSnapshot, str], None] | None = None,
+        on_document_state_changed: Callable[[SessionSnapshot], None] | None = None,
     ) -> None:
         if workers <= 0 or capacity <= 0 or timeout_seconds <= 0:
             raise ValueError("workers, capacity, and timeout_seconds must be positive")
@@ -54,6 +55,7 @@ class JobManager:
         self._metrics = metrics or MetricsRegistry()
         self._timer_factory = timer_factory
         self._webhook_publisher = webhook_publisher
+        self._on_document_state_changed = on_document_state_changed
 
     def submit_document_processing(self, session_id: str) -> SessionSnapshot:
         if not self._slots.acquire(blocking=False):
@@ -152,6 +154,8 @@ class JobManager:
                     ProcessingStatus.FAILED: "document.failed",
                 }[result.status]
                 self._publish(completed, transition_reason)
+                if result.status == ProcessingStatus.SUCCESS:
+                    self._notify_document_state_changed(completed)
                 duration_ms = (perf_counter() - started) * 1000.0
                 self._metrics.record_job(
                     result.status.value,
@@ -217,4 +221,18 @@ class JobManager:
             logger.error(
                 "webhook event enqueue failed",
                 extra={"event": "webhook_enqueue_failed", "exception_type": type(exc).__name__},
+            )
+
+    def _notify_document_state_changed(self, snapshot: SessionSnapshot) -> None:
+        if self._on_document_state_changed is None:
+            return
+        try:
+            self._on_document_state_changed(snapshot)
+        except Exception as exc:
+            logger.error(
+                "document-state callback failed",
+                extra={
+                    "event": "document.state_callback_failed",
+                    "exception_type": type(exc).__name__,
+                },
             )

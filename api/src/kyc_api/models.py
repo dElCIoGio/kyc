@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 class VerificationStatus(StrEnum):
     IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
     VERIFIED = "verified"
     REJECTED = "rejected"
     EXPIRED = "expired"
@@ -36,7 +37,7 @@ class FaceMatchStatus(StrEnum):
     BLOCKED = "blocked"
     READY = "ready"
     PROCESSING = "processing"
-    PASSED = "passed"
+    COMPLETED = "completed"
     FAILED = "failed"
 
 

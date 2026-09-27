@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from threading import RLock
 from uuid import uuid4
 
@@ -63,6 +64,14 @@ class SessionSnapshot:
 
 
 @dataclass(frozen=True)
+class FaceMatchResultSnapshot:
+    """Safe result metadata for the authenticated result representation."""
+
+    status: FaceMatchStatus
+    similarity: float | None
+
+
+@dataclass(frozen=True)
 class DocumentCaptureTransition:
     snapshot: SessionSnapshot
     capture_accepted: SessionSnapshot
@@ -93,6 +102,8 @@ class _LivenessState:
 @dataclass
 class _FaceMatchState:
     status: FaceMatchStatus = FaceMatchStatus.BLOCKED
+    similarity: float | None = None
+    error_code: str | None = None
 
 
 @dataclass
@@ -113,6 +124,7 @@ class SessionStore:
     _DOCUMENT_PROCESSING = {DocumentStatus.QUEUED, DocumentStatus.PROCESSING}
     _DOCUMENT_RESULTS = {DocumentStatus.PASSED, DocumentStatus.PARTIAL, DocumentStatus.FAILED}
     _VERIFICATION_TERMINAL = {
+        VerificationStatus.COMPLETED,
         VerificationStatus.VERIFIED,
         VerificationStatus.REJECTED,
         VerificationStatus.EXPIRED,
@@ -124,6 +136,7 @@ class SessionStore:
         ttl_seconds: int,
         max_sessions: int,
         portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
+        face_match_enabled: bool = False,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
@@ -134,6 +147,7 @@ class SessionStore:
         self._records: dict[str, _SessionRecord] = {}
         self._lock = RLock()
         self.portrait_artifacts = portrait_artifacts
+        self._face_match_enabled = face_match_enabled
 
     def create(self) -> SessionSnapshot:
         with self._lock:
@@ -270,6 +284,7 @@ class SessionStore:
                 ProcessingStatus.PARTIAL: DocumentStatus.PARTIAL,
                 ProcessingStatus.FAILED: DocumentStatus.FAILED,
             }[result.status]
+            self._refresh_face_match_readiness(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -361,9 +376,105 @@ class SessionStore:
             record.liveness.error_code = (
                 None if result.passed else "PASSIVE_LIVENESS_FAILED"
             )
+            self._refresh_face_match_readiness(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
+
+    def start_face_match(self, session_id: str) -> SessionSnapshot:
+        """Atomically claim a ready face match before model inference begins."""
+        with self._lock:
+            record = self._get_record(session_id)
+            if record.status != VerificationStatus.IN_PROGRESS:
+                raise SessionConflict("Verification is no longer active")
+            if record.face_match.status != FaceMatchStatus.READY:
+                raise SessionConflict("Face matching is not ready to start")
+            record.face_match.status = FaceMatchStatus.PROCESSING
+            record.face_match.error_code = None
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def complete_face_match(
+        self, session_id: str, similarity: float
+    ) -> SessionSnapshot | None:
+        if not isfinite(similarity):
+            raise ValueError("Face-match similarity must be finite")
+        with self._lock:
+            record = self._records.get(session_id)
+            if (
+                record is None
+                or record.status != VerificationStatus.IN_PROGRESS
+                or record.face_match.status != FaceMatchStatus.PROCESSING
+            ):
+                return None
+            record.face_match.status = FaceMatchStatus.COMPLETED
+            record.face_match.similarity = float(similarity)
+            record.face_match.error_code = None
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def fail_face_match(self, session_id: str, code: str) -> SessionSnapshot | None:
+        if code not in _FACE_MATCH_FAILURE_CODES:
+            raise ValueError("Face-match failure code is not trusted")
+        with self._lock:
+            record = self._records.get(session_id)
+            if (
+                record is None
+                or record.status != VerificationStatus.IN_PROGRESS
+                or record.face_match.status != FaceMatchStatus.PROCESSING
+            ):
+                return None
+            record.face_match.status = FaceMatchStatus.FAILED
+            record.face_match.similarity = None
+            record.face_match.error_code = code
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def refresh_verification_completion(self, session_id: str) -> SessionSnapshot | None:
+        """Commit the final lifecycle transition exactly once when checks complete."""
+        with self._lock:
+            record = self._records.get(session_id)
+            if record is None:
+                return None
+            if not self._refresh_verification_completion(record):
+                return None
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def face_match_result(self, session_id: str) -> FaceMatchResultSnapshot:
+        with self._lock:
+            record = self._get_record(session_id)
+            return FaceMatchResultSnapshot(
+                status=record.face_match.status,
+                similarity=(
+                    record.face_match.similarity
+                    if record.face_match.status == FaceMatchStatus.COMPLETED
+                    else None
+                ),
+            )
+
+    def release_face_match_biometric_artifacts(self, session_id: str) -> None:
+        """Release terminal face-match inputs without discarding document metadata."""
+        with self._lock:
+            record = self._get_record(session_id)
+            if record.face_match.status not in {
+                FaceMatchStatus.COMPLETED,
+                FaceMatchStatus.FAILED,
+            }:
+                raise SessionConflict("Face-match artifacts cannot be released while active")
+            portrait_id = _face_match_portrait_artifact_id(record.document.result)
+            live_id = record.liveness.live_face_artifact_id
+            artifact_ids = tuple(artifact_id for artifact_id in (portrait_id, live_id) if artifact_id is not None)
+            if artifact_ids and self.portrait_artifacts is not None:
+                self.portrait_artifacts.release_owned(artifact_ids, record.session_id)
+            if portrait_id is not None:
+                record.document.result = _clear_portrait_artifact_id(record.document.result)
+            record.liveness.live_face_artifact_id = None
+            record.liveness.live_face_eligible = False
 
     def fail_liveness(self, session_id: str, code: str) -> SessionSnapshot | None:
         with self._lock:
@@ -467,6 +578,33 @@ class SessionStore:
             and record.document.status == DocumentStatus.PROCESSING
         )
 
+    def _refresh_face_match_readiness(self, record: _SessionRecord) -> bool:
+        """Advance only BLOCKED sessions once every configured input is usable."""
+        if (
+            not self._face_match_enabled
+            or record.face_match.status != FaceMatchStatus.BLOCKED
+            or record.status != VerificationStatus.IN_PROGRESS
+            or record.document.status != DocumentStatus.PASSED
+            or record.liveness.status != LivenessStatus.PASSED
+            or _face_match_portrait_artifact_id(record.document.result) is None
+            or not record.liveness.live_face_eligible
+            or record.liveness.live_face_artifact_id is None
+        ):
+            return False
+        record.face_match.status = FaceMatchStatus.READY
+        return True
+
+    def _refresh_verification_completion(self, record: _SessionRecord) -> bool:
+        if (
+            record.status != VerificationStatus.IN_PROGRESS
+            or record.document.status != DocumentStatus.PASSED
+            or record.liveness.status != LivenessStatus.PASSED
+            or record.face_match.status != FaceMatchStatus.COMPLETED
+        ):
+            return False
+        record.status = VerificationStatus.COMPLETED
+        return True
+
     def _purge_expired(self, now: datetime) -> int:
         expired = [
             session_id
@@ -501,6 +639,48 @@ class SessionStore:
             )
         record.liveness.live_face_artifact_id = None
         record.liveness.live_face_eligible = False
+        record.face_match.similarity = None
+        record.face_match.error_code = None
+
+
+_FACE_MATCH_FAILURE_CODES = frozenset(
+    {
+        "FACE_COMPARISON_FAILED",
+        "FACE_COMPARISON_REFERENCE_UNAVAILABLE",
+        "FACE_COMPARISON_PROBE_UNAVAILABLE",
+        "FACE_COMPARISON_REFERENCE_ZERO_FACES",
+        "FACE_COMPARISON_PROBE_ZERO_FACES",
+        "FACE_COMPARISON_REFERENCE_MULTIPLE_FACES",
+        "FACE_COMPARISON_PROBE_MULTIPLE_FACES",
+        "FACE_COMPARISON_REFERENCE_RECOGNITION_FAILED",
+        "FACE_COMPARISON_PROBE_RECOGNITION_FAILED",
+        "FACE_COMPARISON_INVALID_EMBEDDING",
+        "FACE_COMPARISON_EMPTY_EMBEDDING",
+        "FACE_COMPARISON_ZERO_NORM_EMBEDDING",
+        "FACE_COMPARISON_NONFINITE_EMBEDDING",
+        "FACE_COMPARISON_EMBEDDING_DIMENSION_MISMATCH",
+        "FACE_COMPARISON_NONFINITE_SIMILARITY",
+    }
+)
+
+
+def _face_match_portrait_artifact_id(result: DocumentExtractionResult | None) -> str | None:
+    portrait = result.front.portrait if result is not None and result.front is not None else None
+    if portrait is None or not portrait.eligible_for_face_match:
+        return None
+    return portrait.artifact_id
+
+
+def _clear_portrait_artifact_id(
+    result: DocumentExtractionResult | None,
+) -> DocumentExtractionResult | None:
+    if result is None or result.front is None or result.front.portrait is None:
+        return result
+    portrait = result.front.portrait
+    return replace(
+        result,
+        front=replace(result.front, portrait=replace(portrait, artifact_id=None)),
+    )
 
 
 def _snapshot(record: _SessionRecord) -> SessionSnapshot:

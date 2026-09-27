@@ -141,7 +141,7 @@ class LiveFaceArtifactApiTests(unittest.TestCase):
             self.assertEqual(200, response.status_code)
             payload = response.json()
             for forbidden in ("artifact_id", "image", "pixels", "crop", "bounding_box", "path", "embedding"):
-                self.assertNotIn(forbidden, payload["liveness"])
+                self.assertNotIn(forbidden, payload["session"]["liveness"])
             retained = client.app.state.sessions.resolve_live_face_artifact(session_id)
             self.assertIsNotNone(retained)
             assert retained is not None

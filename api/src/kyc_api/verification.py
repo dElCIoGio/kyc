@@ -158,6 +158,8 @@ class VerificationManager:
         if len(encoded_frames) != evaluator.frame_count:
             raise LivenessInputError("Incorrect number of liveness frames")
         current = self._store.get(session_id)
+        if current.document.status == DocumentStatus.FAILED:
+            raise SessionConflict("Verification is no longer active")
         if current.liveness_status != LivenessStatus.READY:
             raise SessionConflict("Liveness is not ready to start")
 

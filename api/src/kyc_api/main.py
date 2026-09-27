@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import Executor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.formparsers import MultiPartParser
@@ -50,24 +50,22 @@ from .telemetry import (
 from .models import (
     CaptureIssueResponse,
     CaptureResponse,
-    DeleteResponse,
-    DocumentStateResponse,
     DocumentSide,
     ErrorResponse,
     HealthResponse,
     JobStatusResponse,
-    LivenessResponse,
     LivenessSubmissionResponse,
     MetricsResponse,
     SessionResponse,
-    SubsystemStateResponse,
+    VerificationResultResponse,
 )
+from .projection import result_response, session_response
 from .rate_limit import ApiKeyRateLimiter
 from .sessions import (
     SessionCapacityExceeded,
     SessionConflict,
+    SessionExpired,
     SessionNotFound,
-    SessionSnapshot,
     SessionStore,
     SessionStoreError,
 )
@@ -145,22 +143,32 @@ def create_app(
             resolved_face_recognizer = face_recognizer or create_face_recognizer(
                 resolved_settings
             )
+            resolved_liveness_evaluator = (
+                liveness_evaluator
+                if liveness_evaluator is not None
+                else create_liveness_evaluator(resolved_settings)
+            )
+            face_comparison_required = (
+                resolved_face_recognizer is not None
+                and resolved_liveness_evaluator is not None
+            )
             resolved_store = session_store or SessionStore(
                 ttl_seconds=resolved_settings.session_ttl_seconds,
                 max_sessions=resolved_settings.max_sessions,
                 portrait_artifacts=resolved_artifacts,
-                face_match_enabled=resolved_face_recognizer is not None,
+                liveness_required=resolved_liveness_evaluator is not None,
+                face_match_enabled=face_comparison_required,
             )
+            if session_store is not None:
+                resolved_store.configure_requirements(
+                    liveness_required=resolved_liveness_evaluator is not None,
+                    face_match_required=face_comparison_required,
+                )
             resolved_coordinator = coordinator or create_coordinator(
                 resolved_settings, portrait_artifacts=resolved_artifacts
             )
             resolved_capture_assessor = capture_assessor or create_capture_assessor(
                 resolved_settings
-            )
-            resolved_liveness_evaluator = (
-                liveness_evaluator
-                if liveness_evaluator is not None
-                else create_liveness_evaluator(resolved_settings)
             )
             resolved_liveness_intake = liveness_intake or create_liveness_intake(
                 resolved_settings
@@ -312,6 +320,20 @@ def create_app(
     application = FastAPI(
         title="Angolan KYC API",
         version=__version__,
+        description=(
+            "External beta API for technical document, liveness, and optional "
+            "face-comparison workflows. Completion is not an identity approval."
+        ),
+        openapi_tags=[
+            {
+                "name": "Verification sessions",
+                "description": "Create, advance, inspect, retrieve, and delete KYC sessions.",
+            },
+            {
+                "name": "Operations",
+                "description": "Authenticated service diagnostics.",
+            },
+        ],
         lifespan=lifespan,
     )
     application.add_middleware(
@@ -332,6 +354,8 @@ def create_app(
     @application.get(
         "/v1/metrics",
         response_model=MetricsResponse,
+        tags=["Operations"],
+        summary="Retrieve aggregate service metrics",
         dependencies=[Depends(require_api_key)],
         responses={401: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
     )
@@ -344,20 +368,31 @@ def create_app(
         "/v1/sessions",
         response_model=SessionResponse,
         status_code=status.HTTP_201_CREATED,
+        tags=["Verification sessions"],
+        summary="Create a verification session",
+        description="Creates one technical verification workflow. The returned `next_action` guides the next current-session operation.",
         dependencies=[Depends(require_api_key)],
         responses={401: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
     )
     def create_session(request: Request) -> SessionResponse:
-        return _session_response(request.app.state.sessions.create())
+        created = request.app.state.sessions.create()
+        dispatcher = request.app.state.webhook_dispatcher
+        if dispatcher is not None:
+            dispatcher.enqueue(created, "verification.session.created")
+        return session_response(created)
 
     @application.post(
         "/v1/sessions/{session_id}/images/{side}",
         response_model=CaptureResponse,
+        tags=["Verification sessions"],
+        summary="Submit a document side",
+        description="Submits a labelled front or back image. Quality rejection is a successful response with `accepted: false` and retry-safe issues.",
         dependencies=[Depends(require_api_key)],
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             409: {"model": ErrorResponse},
+            410: {"model": ErrorResponse},
             413: {"model": ErrorResponse},
             415: {"model": ErrorResponse},
         },
@@ -401,17 +436,21 @@ def create_app(
                     CaptureIssueResponse(code=issue.code.value, message=issue.message)
                     for issue in submission.assessment.issues
                 ),
-                verification=_session_response(snapshot),
+                session=session_response(snapshot),
             )
 
     @application.post(
         "/v1/sessions/{session_id}/liveness",
         response_model=LivenessSubmissionResponse,
+        tags=["Verification sessions"],
+        summary="Submit liveness frames",
+        description="Submits the configured liveness frame set and returns the updated public session without biometric scores or artifacts.",
         dependencies=[Depends(require_api_key)],
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             409: {"model": ErrorResponse},
+            410: {"model": ErrorResponse},
             413: {"model": ErrorResponse},
             415: {"model": ErrorResponse},
             422: {"model": ErrorResponse},
@@ -456,29 +495,22 @@ def create_app(
                 for frame in frames:
                     await frame.close()
 
-            submission = request.app.state.verifications.submit_liveness(
-                session_id, content
-            )
-            return LivenessSubmissionResponse(
-                session_id=submission.snapshot.session_id,
-                liveness=LivenessResponse(
-                    status=submission.snapshot.liveness_status,
-                    passed=submission.result.passed,
-                    passive_score=submission.result.passive_score,
-                    frames_evaluated=submission.result.frames_evaluated,
-                    real_frames=submission.result.real_frames,
-                ),
-            )
+            submission = request.app.state.verifications.submit_liveness(session_id, content)
+            return LivenessSubmissionResponse(session=session_response(submission.snapshot))
 
     @application.post(
         "/v1/sessions/{session_id}/process",
         response_model=JobStatusResponse,
         status_code=status.HTTP_202_ACCEPTED,
+        tags=["Verification sessions"],
+        summary="Recover deferred document processing",
+        description="Recovery-only operation for an accepted capture left pending by capacity. Normal browser flows rely on automatic processing.",
         dependencies=[Depends(require_api_key)],
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             409: {"model": ErrorResponse},
+            410: {"model": ErrorResponse},
             429: {"model": ErrorResponse},
         },
     )
@@ -492,73 +524,61 @@ def create_app(
                     "document processing queued",
                     extra={"event": "document.processing_queued"},
                 )
-            return JobStatusResponse(
-                session_id=snapshot.session_id,
-                job_id=snapshot.document.job_id,
-                document_status=snapshot.document.status,
-            )
+            return JobStatusResponse(session=session_response(snapshot))
 
     @application.get(
         "/v1/sessions/{session_id}",
         response_model=SessionResponse,
+        tags=["Verification sessions"],
+        summary="Retrieve public session state",
+        description="Returns status and the derived `next_action`, without extracted document values or biometric details.",
         dependencies=[Depends(require_api_key)],
-        responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            410: {"model": ErrorResponse},
+        },
     )
     def get_session(session_id: str, request: Request) -> SessionResponse:
         with _session_logging_context(request, session_id):
-            return _session_response(request.app.state.sessions.get(session_id))
+            return session_response(request.app.state.sessions.get(session_id))
 
     @application.get(
         "/v1/sessions/{session_id}/result",
+        response_model=VerificationResultResponse,
+        tags=["Verification sessions"],
+        summary="Retrieve the normalized document result",
+        description="Available after document processing reaches a terminal result. Raw OCR, QR, engine, and biometric details are excluded.",
         dependencies=[Depends(require_api_key)],
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             409: {"model": ErrorResponse},
+            410: {"model": ErrorResponse},
             500: {"model": ErrorResponse},
         },
     )
-    def get_result(session_id: str, request: Request) -> JSONResponse:
+    def get_result(session_id: str, request: Request) -> VerificationResultResponse:
         with _session_logging_context(request, session_id):
+            snapshot = request.app.state.sessions.get(session_id)
             result = request.app.state.sessions.result(session_id)
-            face_match = request.app.state.sessions.face_match_result(session_id)
-            payload = result.to_dict()
-            payload["face_match"] = {"status": face_match.status.value}
-            if face_match.similarity is not None:
-                payload["face_match"]["similarity"] = face_match.similarity
-            return JSONResponse(content=payload)
+            return result_response(snapshot, result)
 
     @application.delete(
         "/v1/sessions/{session_id}",
-        response_model=DeleteResponse,
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["Verification sessions"],
+        summary="Delete a verification session",
+        description="Idempotently clears the session and its retained sensitive state.",
         dependencies=[Depends(require_api_key)],
         responses={401: {"model": ErrorResponse}},
     )
-    def delete_session(session_id: str, request: Request) -> DeleteResponse:
+    def delete_session(session_id: str, request: Request) -> Response:
         with _session_logging_context(request, session_id):
             request.app.state.sessions.delete(session_id)
-            return DeleteResponse()
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return application
-
-
-def _session_response(snapshot: SessionSnapshot) -> SessionResponse:
-    return SessionResponse(
-        session_id=snapshot.session_id,
-        verification_status=snapshot.verification_status,
-        created_at=snapshot.created_at,
-        expires_at=snapshot.expires_at,
-        document=DocumentStateResponse(
-            status=snapshot.document.status,
-            front_capture=snapshot.document.front_capture,
-            back_capture=snapshot.document.back_capture,
-            job_id=snapshot.document.job_id,
-            result_available=snapshot.document.result_available,
-            error_code=snapshot.document.error_code,
-        ),
-        liveness=SubsystemStateResponse(status=snapshot.liveness_status),
-        face_match=SubsystemStateResponse(status=snapshot.face_match_status),
-    )
 
 
 def _validate_upload_metadata(image: UploadFile) -> None:
@@ -646,10 +666,27 @@ def _install_error_handlers(application: FastAPI) -> None:
             request_id=_request_id(request),
         )
 
+    @application.exception_handler(SessionExpired)
+    async def session_expired(
+        request: Request, _exc: SessionExpired
+    ) -> JSONResponse:
+        _record_error(request, "SESSION_EXPIRED")
+        return _error_response(
+            410,
+            "SESSION_EXPIRED",
+            "Session has expired",
+            request_id=_request_id(request),
+        )
+
     @application.exception_handler(SessionConflict)
     async def session_conflict(request: Request, exc: SessionConflict) -> JSONResponse:
         _record_error(request, exc.code)
-        return _error_response(409, exc.code, str(exc), request_id=_request_id(request))
+        return _error_response(
+            409,
+            exc.code,
+            "The session cannot perform this operation in its current state",
+            request_id=_request_id(request),
+        )
 
     @application.exception_handler(SessionCapacityExceeded)
     async def session_capacity(

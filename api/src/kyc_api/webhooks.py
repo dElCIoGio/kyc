@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from .projection import session_response
 from .sessions import SessionSnapshot
 
 
@@ -24,57 +25,45 @@ logger = logging.getLogger(__name__)
 class WebhookEvent:
     event_id: str
     session_id: str
-    job_id: str | None
     sequence: int
-    verification_status: str
-    document_status: str
-    liveness_status: str
-    face_match_status: str
-    front_capture: str
-    back_capture: str
+    event_type: str
+    session_status: str
+    next_action: str | None
     result_available: bool
-    transition_reason: str
-    occurred_at: str
+    created_at: str
 
     @classmethod
     def from_snapshot(
-        cls, snapshot: SessionSnapshot, *, transition_reason: str = "session.updated"
-    ) -> "WebhookEvent":
+        cls, snapshot: SessionSnapshot, *, transition_reason: str
+    ) -> "WebhookEvent | None":
+        event_type = _event_type(transition_reason)
+        if event_type is None:
+            return None
+        session = session_response(snapshot)
         return cls(
             event_id=uuid4().hex,
             session_id=snapshot.session_id,
-            job_id=snapshot.document.job_id,
             sequence=snapshot.event_sequence,
-            verification_status=snapshot.verification_status.value,
-            document_status=snapshot.document.status.value,
-            liveness_status=snapshot.liveness_status.value,
-            face_match_status=snapshot.face_match_status.value,
-            front_capture=snapshot.document.front_capture.value,
-            back_capture=snapshot.document.back_capture.value,
-            result_available=snapshot.document.result_available,
-            transition_reason=transition_reason,
-            occurred_at=datetime.now(UTC).isoformat(),
+            event_type=event_type,
+            session_status=session.status.value,
+            next_action=session.next_action.value if session.next_action is not None else None,
+            result_available=session.document.result_available,
+            created_at=datetime.now(UTC).isoformat(),
         )
 
     def payload(self) -> bytes:
         return json.dumps(
             {
-                "version": "1",
+                "schema_version": "1",
                 "id": self.event_id,
-                "type": "kyc.session.updated",
-                "occurred_at": self.occurred_at,
+                "type": self.event_type,
+                "created_at": self.created_at,
                 "data": {
                     "session_id": self.session_id,
-                    "job_id": self.job_id,
                     "sequence": self.sequence,
-                    "verification_status": self.verification_status,
-                    "document_status": self.document_status,
-                    "liveness_status": self.liveness_status,
-                    "face_match_status": self.face_match_status,
-                    "front_capture": self.front_capture,
-                    "back_capture": self.back_capture,
+                    "status": self.session_status,
+                    "next_action": self.next_action,
                     "result_available": self.result_available,
-                    "transition_reason": self.transition_reason,
                 },
             },
             separators=(",", ":"),
@@ -191,10 +180,11 @@ class WebhookDispatcher:
     def start(self) -> None:
         self._thread.start()
 
-    def enqueue(self, snapshot: SessionSnapshot, transition_reason: str = "session.updated") -> None:
-        self._outbox.enqueue(
-            WebhookEvent.from_snapshot(snapshot, transition_reason=transition_reason)
-        )
+    def enqueue(self, snapshot: SessionSnapshot, transition_reason: str) -> None:
+        event = WebhookEvent.from_snapshot(snapshot, transition_reason=transition_reason)
+        if event is None:
+            return
+        self._outbox.enqueue(event)
         self._wake.set()
 
     def shutdown(self) -> None:
@@ -245,3 +235,17 @@ class WebhookDispatcher:
             return False, retry_after, exc.code == 408 or exc.code == 429 or exc.code >= 500
         except urllib.error.URLError:
             return False, None, True
+
+
+def _event_type(transition_reason: str) -> str | None:
+    """Map internal transitions to the small external lifecycle vocabulary."""
+    return {
+        "verification.session.created": "verification.session.created",
+        "document.passed": "verification.document.completed",
+        "document.partial": "verification.document.completed",
+        "document.failed": "verification.document.failed",
+        "liveness.passed": "verification.liveness.passed",
+        "liveness.failed": "verification.liveness.failed",
+        "face_match.failed": "verification.processing.failed",
+        "verification.completed": "verification.processing.completed",
+    }.get(transition_reason)

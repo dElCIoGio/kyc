@@ -193,6 +193,9 @@ their existing generic error codes and messages.
 
 ## Verification Workflow
 
+The public beta contract, state matrix, JSON examples, webhook envelope, and
+browser credential boundary are documented in [`docs/api-contract.md`](../docs/api-contract.md).
+
 All `/v1/*` calls require the `X-API-Key` header. `/healthz` is public and never
 returns document data.
 
@@ -203,9 +206,9 @@ curl.exe -X POST http://127.0.0.1:8000/v1/sessions `
   -H "X-API-Key: $env:KYC_API_KEY"
 ```
 
-Each session is one verification. It begins with document capture awaiting both
-sides, liveness blocked, and face matching blocked. Upload the front and back
-images using the returned ID. Every upload is assessed before it is retained;
+Each session is one technical verification workflow. It begins with document
+capture awaiting both sides; the public `next_action` tells the caller what it
+can do next. Upload the front and back images using the returned ID. Every upload is assessed before it is retained;
 an ordinary quality rejection returns `200` with `accepted: false` and safe
 issue codes, so the caller can retry without changing stored captures. The
 capture sharpness, exposure, and contrast thresholds are initial uncalibrated
@@ -222,8 +225,8 @@ curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/images/back `
   -F "image=@private-data/ao-id-back/back.jpeg;type=image/jpeg"
 ```
 
-When both captures are accepted, the document job is queued automatically and
-liveness becomes `ready`. Poll the verification state:
+When both captures are accepted, document processing starts automatically. Poll
+the public session state and follow its derived `next_action`:
 
 ```powershell
 curl.exe http://127.0.0.1:8000/v1/sessions/SESSION_ID `
@@ -243,27 +246,18 @@ curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/liveness `
   -F "frames=@private-data/liveness/frame-3.jpeg;type=image/jpeg"
 ```
 
-The response contains only aggregate `passed`, `passive_score`,
-`frames_evaluated`, and `real_frames` values. MiniFASNet passive liveness and
-the three-frame/two-real policy are initial uncalibrated development defaults;
-they are not a complete production biometric-verification decision. Document
-processing and liveness progress independently after document capture. When the
-optional local development recognizer is configured, an eligible document
-portrait and selected live frame automatically run one internal face-match
-comparison after both checks pass. The session reports only face-match lifecycle
-state; the authenticated result response appends a `face_match` object with the
-raw `similarity` only after completion. That score is uncalibrated development
-metadata, not a thresholded match, acceptance, rejection, or `verified`
-decision. When recognition is not configured, face matching remains `blocked`
-and verification remains `in_progress`.
+The response returns the updated public session only. It never contains liveness
+scores, frame counts, crops, images, or biometric artifacts. MiniFASNet passive
+liveness remains an initial uncalibrated technical check, not an identity
+approval decision. When configured, face comparison is an internal technical
+check; its raw similarity is never exposed by sessions, results, or webhooks.
 
-`POST /v1/sessions/SESSION_ID/process` remains available as a safe retry if a
-completed capture is left `ready` because bounded job capacity was unavailable.
-It returns the existing queued or processing job rather than creating a second
-one.
+`POST /v1/sessions/SESSION_ID/process` remains available only as a recovery
+operation if bounded job capacity left processing pending. It returns an updated
+session and never creates duplicate work.
 
-Retrieve the structured result after `document.status` becomes `passed`,
-`partial`, or `failed`:
+Retrieve the normalized result once `document.result_available` is true. Its
+document outcome may be `completed`, `partial`, or `failed`:
 
 ```powershell
 curl.exe http://127.0.0.1:8000/v1/sessions/SESSION_ID/result `
@@ -298,9 +292,9 @@ removed on deletion or expiry. Sessions do not survive process restarts. Deletin
 a currently running session removes its tracked state but cannot interrupt native
 OCR work that has already started.
 
-Liveness frames are not added to session state or `LivenessResult`. A future
-face-matching stage may use a separate, explicitly transient `LivenessArtifacts`
-boundary for a selected reference frame; it does not exist yet.
+Liveness frames are not added to session state or `LivenessResult`. A selected
+reference frame, when needed for configured face comparison, remains transient
+and internal-only.
 
 The first version is intended for one trusted, single-process deployment. Running
 multiple Uvicorn workers creates independent session stores; use exactly one

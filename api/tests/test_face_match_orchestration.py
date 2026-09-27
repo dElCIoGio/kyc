@@ -590,7 +590,7 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         self.assertEqual(VerificationStatus.COMPLETED, self.store.get(session_id).verification_status)
         self.assertEqual([FaceMatchStatus.COMPLETED], cleanup_states)
 
-    def test_result_appends_safe_face_match_metadata_without_webhook_score(self) -> None:
+    def test_result_and_webhook_exclude_face_match_similarity(self) -> None:
         session_id = self.store.create().session_id
         _, _ = self._document_passed(session_id)
         _, _ = self._liveness_passed(session_id)
@@ -598,7 +598,9 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         completed = self.store.complete_face_match(session_id, 0.6487)
         assert completed is not None
         self.store.refresh_verification_completion(session_id)
-        event_data = WebhookEvent.from_snapshot(completed, transition_reason="face_match.completed").payload()
+        event = WebhookEvent.from_snapshot(completed, transition_reason="verification.completed")
+        assert event is not None
+        event_data = event.payload()
         self.assertNotIn(b"0.6487", event_data)
         with TestClient(
             create_app(
@@ -607,10 +609,8 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         ) as client:
             response = client.get(f"/v1/sessions/{session_id}/result", headers=AUTH_HEADERS)
         self.assertEqual(200, response.status_code)
-        self.assertEqual("1.1", response.json()["schema_version"])
-        self.assertEqual(
-            {"status": "completed", "similarity": 0.6487}, response.json()["face_match"]
-        )
+        self.assertNotIn("similarity", response.text)
+        self.assertEqual("completed", response.json()["face_comparison"]["status"])
 
 
 if __name__ == "__main__":

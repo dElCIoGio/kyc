@@ -96,9 +96,9 @@ part of the library API.
 The separate `api/` project depends on the installed library and owns HTTP
 authentication, bounded multipart intake, session state, background job
 execution, expiry, and HTTP error mapping. It passes in-memory bytes to
-`DocumentCoordinator` and returns `DocumentExtractionResult.to_dict()` only from
-the authenticated result endpoint. It does not duplicate extraction stages or
-modify library results.
+`DocumentCoordinator` and projects its internal result into a stable,
+PII-minimal public result only at the authenticated result endpoint. It does
+not duplicate extraction stages.
 
 The first API deployment is deliberately single-process. Its session store and
 job queue are in memory, so multiple server workers would create isolated state.
@@ -113,10 +113,10 @@ When explicitly configured, an internal local recognizer automatically derives
 a raw cosine similarity from the two eligibility-gated artifacts after document
 and liveness pass. A locked lifecycle advances face matching through `ready`,
 `processing`, and `completed` (or `failed`), then releases both biometric
-artifacts. The score is ephemeral session metadata exposed only by the
-authenticated result response; it is uncalibrated and does not apply a
-threshold, make an identity decision, or transition a verification to
-`verified`/`rejected`. A verification becomes `completed` only after all three
-configured checks complete successfully. Without a configured recognizer, face
-matching stays blocked and verification stays in progress. The passive policy
-is an initial uncalibrated development default.
+artifacts. The score is ephemeral internal metadata and never appears in public
+API or webhook payloads; it does not apply a threshold or make an identity
+decision. Public technical completion is derived only after every check required
+for that session completes successfully. A deliberately unconfigured comparison
+is reported as unavailable and excluded from that aggregation. The passive
+policy is an initial uncalibrated development default. See
+[the public API contract](api-contract.md) for the external projection.

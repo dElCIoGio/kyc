@@ -33,6 +33,10 @@ class SessionNotFound(SessionStoreError):
     code = "SESSION_NOT_FOUND"
 
 
+class SessionExpired(SessionStoreError):
+    code = "SESSION_EXPIRED"
+
+
 class SessionConflict(SessionStoreError):
     code = "INVALID_SESSION_STATE"
 
@@ -60,6 +64,8 @@ class SessionSnapshot:
     document: DocumentSnapshot
     liveness_status: LivenessStatus
     face_match_status: FaceMatchStatus
+    liveness_required: bool = True
+    face_match_required: bool = False
     event_sequence: int = 0
 
 
@@ -115,6 +121,8 @@ class _SessionRecord:
     document: _DocumentState
     liveness: _LivenessState
     face_match: _FaceMatchState
+    liveness_required: bool
+    face_match_required: bool
     event_sequence: int = 0
 
 
@@ -136,6 +144,7 @@ class SessionStore:
         ttl_seconds: int,
         max_sessions: int,
         portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
+        liveness_required: bool = True,
         face_match_enabled: bool = False,
     ) -> None:
         if ttl_seconds <= 0:
@@ -145,9 +154,25 @@ class SessionStore:
         self._ttl = timedelta(seconds=ttl_seconds)
         self._max_sessions = max_sessions
         self._records: dict[str, _SessionRecord] = {}
+        # Only opaque identifiers and their purge deadlines are retained after
+        # expiry so callers receive 410 rather than an ambiguous 404.
+        self._expired: dict[str, datetime] = {}
         self._lock = RLock()
         self.portrait_artifacts = portrait_artifacts
+        self._liveness_required = liveness_required
         self._face_match_enabled = face_match_enabled
+
+    def configure_requirements(
+        self, *, liveness_required: bool, face_match_required: bool
+    ) -> None:
+        """Bind process configuration before the store serves any sessions."""
+        with self._lock:
+            if self._records:
+                # Test and composition callers may provide an already-populated
+                # store. Preserve the requirements bound to those sessions.
+                return
+            self._liveness_required = liveness_required
+            self._face_match_enabled = face_match_required
 
     def create(self) -> SessionSnapshot:
         with self._lock:
@@ -163,6 +188,8 @@ class SessionStore:
                 document=_DocumentState(),
                 liveness=_LivenessState(),
                 face_match=_FaceMatchState(),
+                liveness_required=self._liveness_required,
+                face_match_required=self._face_match_enabled,
             )
             self._records[record.session_id] = record
             return _snapshot(record)
@@ -508,6 +535,7 @@ class SessionStore:
             record = self._records.pop(session_id, None)
             if record is not None:
                 self._clear_sensitive_state(record)
+            self._expired.pop(session_id, None)
 
     def resolve_portrait_artifact(self, session_id: str):
         """Internal-only future matcher boundary; no API route calls this method."""
@@ -568,6 +596,8 @@ class SessionStore:
         try:
             return self._records[session_id]
         except KeyError as exc:
+            if session_id in self._expired:
+                raise SessionExpired("Session has expired") from exc
             raise SessionNotFound("Session was not found") from exc
 
     def _can_finish_document_job(self, record: _SessionRecord | None, job_id: str) -> bool:
@@ -606,6 +636,11 @@ class SessionStore:
         return True
 
     def _purge_expired(self, now: datetime) -> int:
+        self._expired = {
+            session_id: retained_until
+            for session_id, retained_until in self._expired.items()
+            if retained_until > now
+        }
         expired = [
             session_id
             for session_id, record in self._records.items()
@@ -615,6 +650,7 @@ class SessionStore:
             record = self._records.pop(session_id)
             record.status = VerificationStatus.EXPIRED
             self._clear_sensitive_state(record)
+            self._expired[session_id] = now + self._ttl
         return len(expired)
 
     def _refresh_expiry(self, record: _SessionRecord) -> None:
@@ -708,6 +744,8 @@ def _snapshot(record: _SessionRecord) -> SessionSnapshot:
         ),
         liveness_status=record.liveness.status,
         face_match_status=record.face_match.status,
+        liveness_required=record.liveness_required,
+        face_match_required=record.face_match_required,
         event_sequence=record.event_sequence,
     )
 

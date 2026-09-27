@@ -16,7 +16,7 @@ from kyc_engine.intake import ImageIntake
 from kyc_api.jobs import JobCapacityExceeded, JobManager
 from kyc_api.main import create_app
 from kyc_api.models import DocumentSide, VerificationStatus
-from kyc_api.sessions import SessionConflict, SessionNotFound, SessionStore, _now
+from kyc_api.sessions import SessionConflict, SessionExpired, SessionStore, _now
 from kyc_api.verification import VerificationManager
 from kyc_api.webhooks import WebhookEvent
 
@@ -66,7 +66,7 @@ class ApiSessionTests(unittest.TestCase):
             payload = self.client.get(
                 f"/v1/sessions/{session_id}", headers=AUTH_HEADERS
             ).json()
-            if payload["document"]["status"] in {"passed", "partial", "failed"}:
+            if payload["document"]["status"] in {"completed", "failed"}:
                 return payload
             time.sleep(0.01)
         self.fail("document did not reach a terminal state")
@@ -74,12 +74,13 @@ class ApiSessionTests(unittest.TestCase):
     def test_new_verification_exposes_independent_initial_states(self) -> None:
         session_id = self.create_session()
         payload = self.client.get(f"/v1/sessions/{session_id}", headers=AUTH_HEADERS).json()
-        self.assertEqual("in_progress", payload["verification_status"])
+        self.assertEqual("in_progress", payload["status"])
+        self.assertEqual("submit_document_front", payload["next_action"])
         self.assertEqual("awaiting_capture", payload["document"]["status"])
         self.assertEqual("missing", payload["document"]["front_capture"])
         self.assertEqual("missing", payload["document"]["back_capture"])
-        self.assertEqual("blocked", payload["liveness"]["status"])
-        self.assertEqual("blocked", payload["face_match"]["status"])
+        self.assertEqual("not_available", payload["liveness"]["status"])
+        self.assertEqual("not_available", payload["face_comparison"]["status"])
         self.assertNotIn("result", payload)
 
     def test_rejected_capture_remains_missing_and_can_be_retried(self) -> None:
@@ -88,25 +89,25 @@ class ApiSessionTests(unittest.TestCase):
         self.assertEqual(200, rejected.status_code)
         self.assertFalse(rejected.json()["accepted"])
         self.assertIn("low_contrast", {item["code"] for item in rejected.json()["issues"]})
-        self.assertEqual("missing", rejected.json()["verification"]["document"]["front_capture"])
+        self.assertEqual("missing", rejected.json()["session"]["document"]["front_capture"])
 
         accepted = self.upload(session_id, "front")
         self.assertTrue(accepted.json()["accepted"])
-        self.assertEqual("accepted", accepted.json()["verification"]["document"]["front_capture"])
+        self.assertEqual("accepted", accepted.json()["session"]["document"]["front_capture"])
 
     def test_one_accepted_side_does_not_start_processing(self) -> None:
         session_id = self.create_session()
         response = self.upload(session_id, "back")
-        payload = response.json()["verification"]
+        payload = response.json()["session"]
         self.assertTrue(response.json()["accepted"])
         self.assertEqual("awaiting_capture", payload["document"]["status"])
-        self.assertEqual("blocked", payload["liveness"]["status"])
+        self.assertEqual("not_available", payload["liveness"]["status"])
         self.assertEqual([], self.coordinator.calls)
 
     def test_front_accepted_while_back_remains_missing(self) -> None:
         session_id = self.create_session()
         response = self.upload(session_id, "front")
-        payload = response.json()["verification"]
+        payload = response.json()["session"]
         self.assertTrue(response.json()["accepted"])
         self.assertEqual("accepted", payload["document"]["front_capture"])
         self.assertEqual("missing", payload["document"]["back_capture"])
@@ -126,17 +127,16 @@ class ApiSessionTests(unittest.TestCase):
 
     def test_webhook_state_is_safe_and_identifies_the_transition(self) -> None:
         snapshot = SessionStore(ttl_seconds=60, max_sessions=2).create()
-        event = WebhookEvent.from_snapshot(
-            snapshot, transition_reason="document.capture_accepted"
-        )
+        event = WebhookEvent.from_snapshot(snapshot, transition_reason="verification.session.created")
+        assert event is not None
         payload = json.loads(event.payload())
         data = payload["data"]
-        self.assertEqual("kyc.session.updated", payload["type"])
-        self.assertEqual("in_progress", data["verification_status"])
-        self.assertEqual("awaiting_capture", data["document_status"])
-        self.assertEqual("document.capture_accepted", data["transition_reason"])
+        self.assertEqual("verification.session.created", payload["type"])
+        self.assertEqual("in_progress", data["status"])
+        self.assertEqual("submit_document_front", data["next_action"])
         self.assertNotIn("metrics", data)
         self.assertNotIn("image", data)
+        self.assertNotIn("job_id", data)
 
     def test_second_required_capture_unlocks_liveness_and_starts_one_job(self) -> None:
         started, release = Event(), Event()
@@ -156,8 +156,8 @@ class ApiSessionTests(unittest.TestCase):
             self.assertTrue(response.json()["accepted"])
             self.assertTrue(started.wait(timeout=1))
             current = client.get(f"/v1/sessions/{session_id}", headers=AUTH_HEADERS).json()
-            self.assertEqual("ready", current["liveness"]["status"])
-            self.assertEqual("blocked", current["face_match"]["status"])
+            self.assertEqual("not_available", current["liveness"]["status"])
+            self.assertEqual("not_available", current["face_comparison"]["status"])
             self.assertEqual("processing", current["document"]["status"])
             duplicate = client.post(f"/v1/sessions/{session_id}/process", headers=AUTH_HEADERS)
             self.assertEqual(202, duplicate.status_code)
@@ -177,13 +177,14 @@ class ApiSessionTests(unittest.TestCase):
                     files={"image": (f"{side}.png", PNG_BYTES, "image/png")},
                 )
             terminal = self._wait_with_client(client, session_id)
-            self.assertEqual("passed", terminal["document"]["status"])
-            self.assertEqual("in_progress", terminal["verification_status"])
+            self.assertEqual("completed", terminal["document"]["status"])
+            self.assertEqual("completed", terminal["status"])
             self.assertTrue(terminal["document"]["result_available"])
             self.assertFalse(store.contains_images(session_id))
             result = client.get(f"/v1/sessions/{session_id}/result", headers=AUTH_HEADERS)
             self.assertEqual(200, result.status_code)
-            self.assertEqual("1.0", result.json()["schema_version"])
+            self.assertEqual(session_id, result.json()["session_id"])
+            self.assertNotIn("schema_version", result.json())
 
     def test_process_requires_both_accepted_sides(self) -> None:
         session_id = self.create_session()
@@ -231,7 +232,7 @@ class ApiSessionTests(unittest.TestCase):
         self.assertNotIn(ready, store._records)
         self.assertIsNone(ready_record.document.front)
         self.assertIsNone(ready_record.document.back)
-        with self.assertRaises(SessionNotFound):
+        with self.assertRaises(SessionExpired):
             store.get(ready)
 
     def test_expiration_invalidates_queued_and_processing_document_work(self) -> None:
@@ -253,7 +254,7 @@ class ApiSessionTests(unittest.TestCase):
         self.assertIsNone(processing_record.document.front)
         self.assertIsNone(processing_record.document.back)
         self.assertIsNone(store.complete_document_processing(processing, processing_job, extraction_result()))
-        with self.assertRaises(SessionNotFound):
+        with self.assertRaises(SessionExpired):
             store.start_document_processing(queued, queued_job)
 
     def test_liveness_transitions_are_independent_and_snapshot_safe(self) -> None:
@@ -309,7 +310,7 @@ class ApiSessionTests(unittest.TestCase):
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             payload = client.get(f"/v1/sessions/{session_id}", headers=AUTH_HEADERS).json()
-            if payload["document"]["status"] in {"passed", "partial", "failed"}:
+            if payload["document"]["status"] in {"completed", "failed"}:
                 return payload
             time.sleep(0.01)
         self.fail("document did not reach a terminal state")

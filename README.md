@@ -88,8 +88,9 @@ The structured result is written to the ignored
 
 The separate [`api`](api/README.md) project installs this library and exposes a
 session-based HTTP workflow for uploading labelled card sides, starting an
-in-memory extraction job, polling status, and retrieving the nested coordinator
-result. It uses API-key authentication and does not persist uploads or results.
+in-memory extraction job, polling public lifecycle status, and retrieving a
+safe normalized result. It uses API-key authentication and does not persist
+uploads or results. See the [beta API contract](docs/api-contract.md).
 
 ```powershell
 python -m pip install -e ".[ocr]"

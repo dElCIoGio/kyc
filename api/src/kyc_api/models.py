@@ -15,6 +15,46 @@ class VerificationStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class SessionStatus(StrEnum):
+    """Customer-facing technical workflow status, never an identity decision."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class NextAction(StrEnum):
+    """The only actions a customer can take on the current session."""
+
+    SUBMIT_DOCUMENT_FRONT = "submit_document_front"
+    SUBMIT_DOCUMENT_BACK = "submit_document_back"
+    SUBMIT_LIVENESS = "submit_liveness"
+    WAIT = "wait"
+
+
+class PublicDocumentStatus(StrEnum):
+    AWAITING_CAPTURE = "awaiting_capture"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class PublicLivenessStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    PROCESSING = "processing"
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_AVAILABLE = "not_available"
+
+
+class PublicFaceComparisonStatus(StrEnum):
+    NOT_STARTED = "not_started"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    NOT_AVAILABLE = "not_available"
+
+
 class DocumentStatus(StrEnum):
     AWAITING_CAPTURE = "awaiting_capture"
     READY = "ready"
@@ -61,18 +101,22 @@ class CaptureIssueResponse(BaseModel):
 class DocumentStateResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: DocumentStatus
+    status: PublicDocumentStatus
     front_capture: CaptureStatus
     back_capture: CaptureStatus
-    job_id: str | None = None
     result_available: bool = False
-    error_code: str | None = None
 
 
-class SubsystemStateResponse(BaseModel):
+class LivenessStateResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: LivenessStatus | FaceMatchStatus
+    status: PublicLivenessStatus
+
+
+class FaceComparisonStateResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status: PublicFaceComparisonStatus
 
 
 class SessionResponse(BaseModel):
@@ -81,12 +125,13 @@ class SessionResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     session_id: str
-    verification_status: VerificationStatus
+    status: SessionStatus
     created_at: datetime
     expires_at: datetime
+    next_action: NextAction | None
     document: DocumentStateResponse
-    liveness: SubsystemStateResponse
-    face_match: SubsystemStateResponse
+    liveness: LivenessStateResponse
+    face_comparison: FaceComparisonStateResponse
 
 
 class CaptureResponse(BaseModel):
@@ -96,40 +141,56 @@ class CaptureResponse(BaseModel):
     side: DocumentSide
     accepted: bool
     issues: tuple[CaptureIssueResponse, ...] = ()
-    verification: SessionResponse
-
-
-class LivenessResponse(BaseModel):
-    """Safe aggregate result; biometric frame data is never represented here."""
-
-    model_config = ConfigDict(frozen=True)
-
-    status: LivenessStatus
-    passed: bool
-    passive_score: float
-    frames_evaluated: int
-    real_frames: int
+    session: SessionResponse
 
 
 class LivenessSubmissionResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    session_id: str
-    liveness: LivenessResponse
+    session: SessionResponse
 
 
 class JobStatusResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    session_id: str
-    job_id: str | None = None
-    document_status: DocumentStatus
+    session: SessionResponse
 
 
-class DeleteResponse(BaseModel):
+class ResultFieldResponse(BaseModel):
+    """Canonical document value without OCR candidates or provenance internals."""
+
     model_config = ConfigDict(frozen=True)
 
-    deleted: bool = True
+    status: str
+    value: str | None = None
+
+
+class ResultIssueResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    message: str
+    field_name: str | None = None
+
+
+class ResultDocumentResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status: str
+    document_type: str | None = None
+    fields: Mapping[str, ResultFieldResponse]
+    issues: tuple[ResultIssueResponse, ...] = ()
+
+
+class VerificationResultResponse(BaseModel):
+    """Public normalized document result; biometric and processing details stay internal."""
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    document: ResultDocumentResponse
+    liveness: LivenessStateResponse
+    face_comparison: FaceComparisonStateResponse
 
 
 class HealthResponse(BaseModel):

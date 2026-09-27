@@ -12,9 +12,8 @@ from kyc_engine import LivenessNoFaceError, LivenessResult
 from kyc_engine.intake import ImageIntake
 from kyc_api.jobs import JobManager
 from kyc_api.main import create_app
-from kyc_api.models import DocumentSide
-from kyc_api.sessions import SessionConflict, SessionNotFound, SessionStore, _now
-from kyc_api.verification import LivenessOperationalError, VerificationManager
+from kyc_api.sessions import SessionConflict, SessionExpired, SessionStore, _now
+from kyc_api.verification import VerificationManager
 
 from helpers import (
     AUTH_HEADERS,
@@ -75,23 +74,20 @@ class ApiLivenessTests(unittest.TestCase):
             files=[("frames", value) for value in values],
         )
 
-    def test_successful_submission_returns_safe_aggregate_only(self) -> None:
+    def test_successful_submission_returns_updated_session_only(self) -> None:
         session_id = self._ready_session()
         response = self._submit(session_id)
 
         self.assertEqual(200, response.status_code)
         payload = response.json()
-        self.assertEqual(session_id, payload["session_id"])
-        self.assertEqual("passed", payload["liveness"]["status"])
-        self.assertTrue(payload["liveness"]["passed"])
-        self.assertEqual(3, payload["liveness"]["frames_evaluated"])
-        self.assertNotIn("image", payload["liveness"])
-        self.assertNotIn("crop", payload["liveness"])
-        self.assertNotIn("tensor", payload["liveness"])
+        self.assertEqual(session_id, payload["session"]["session_id"])
+        self.assertEqual("passed", payload["session"]["liveness"]["status"])
+        self.assertNotIn("passive_score", response.text)
+        self.assertNotIn("frames_evaluated", response.text)
         self.assertEqual(1, self.evaluator.calls)
         self.assertEqual(3, len(self.evaluator.frames or ()))
 
-    def test_document_timeout_leaves_liveness_ready_for_successful_submission(self) -> None:
+    def test_document_timeout_makes_the_current_session_terminal(self) -> None:
         self.client.app.state.jobs._timer_factory = _ImmediateTimer
         session_id = self._ready_session()
 
@@ -106,14 +102,12 @@ class ApiLivenessTests(unittest.TestCase):
             self.fail("document processing did not time out")
 
         assert current is not None
-        self.assertEqual("JOB_TIMEOUT", current["document"]["error_code"])
-        self.assertEqual("ready", current["liveness"]["status"])
-        self.assertEqual("blocked", current["face_match"]["status"])
+        self.assertEqual("failed", current["status"])
+        self.assertIsNone(current["next_action"])
 
         response = self._submit(session_id)
-        self.assertEqual(200, response.status_code)
-        self.assertEqual("passed", response.json()["liveness"]["status"])
-        self.assertEqual(1, self.evaluator.calls)
+        self.assertEqual(409, response.status_code)
+        self.assertEqual(0, self.evaluator.calls)
 
     def test_failed_decision_is_a_safe_successful_liveness_interaction(self) -> None:
         self.context.__exit__(None, None, None)
@@ -124,8 +118,8 @@ class ApiLivenessTests(unittest.TestCase):
         self.client = self.context.__enter__()
         response = self._submit(self._ready_session())
         self.assertEqual(200, response.status_code)
-        self.assertEqual("failed", response.json()["liveness"]["status"])
-        self.assertFalse(response.json()["liveness"]["passed"])
+        self.assertEqual("failed", response.json()["session"]["liveness"]["status"])
+        self.assertEqual("failed", response.json()["session"]["status"])
 
     def test_invalid_count_format_and_state_are_rejected(self) -> None:
         session_id = self._ready_session()
@@ -178,6 +172,7 @@ class ApiLivenessTests(unittest.TestCase):
         self.assertEqual("NO_FACE_DETECTED", response.json()["error"]["code"])
         current = self.client.get(f"/v1/sessions/{session_id}", headers=AUTH_HEADERS).json()
         self.assertEqual("failed", current["liveness"]["status"])
+        self.assertEqual("failed", current["status"])
 
     def test_oversized_upload_and_evaluator_error_do_not_expose_details(self) -> None:
         self.context.__exit__(None, None, None)
@@ -274,7 +269,7 @@ class VerificationManagerLivenessTests(unittest.TestCase):
             expired = store.create().session_id
             accept_document(store, expired)
             store._records[expired].expires_at = _now() - timedelta(seconds=1)
-            with self.assertRaises(SessionNotFound):
+            with self.assertRaises(SessionExpired):
                 manager.submit_liveness(expired, [PNG_BYTES] * 3)
 
             session_id = store.create().session_id

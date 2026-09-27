@@ -251,11 +251,8 @@ class VerificationOrchestrator:
         self._publish(completed, "face_match.completed")
         self._release_artifacts(session_id)
 
-        # A delete or expiry after the completed transition is a benign race.
-        final = self._store.refresh_verification_completion(session_id)
-        if final is not None:
-            self._publish(final, "verification.completed")
-            return final
+        if completed.verification_status.value == "completed":
+            self._publish(completed, "verification.completed")
         return completed
 
     def _fail(self, session_id: str, code: str) -> SessionSnapshot | None:
@@ -267,6 +264,8 @@ class VerificationOrchestrator:
         if failed is None:
             return None
         self._publish(failed, "face_match.failed")
+        if failed.face_match_required:
+            self._publish(failed, "verification.failed")
         self._release_artifacts(session_id)
         return failed
 

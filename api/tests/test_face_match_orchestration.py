@@ -198,7 +198,8 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
             ["face_match.started", "face_match.completed", "verification.completed"],
             [event[0] for event in events],
         )
-        self.assertEqual(3, len({event[1] for event in events}))
+        self.assertEqual(2, len({event[1] for event in events}))
+        self.assertEqual(events[-2][1], events[-1][1])
         self.assertFalse(self.artifacts.exists(document_artifact))
         self.assertFalse(self.artifacts.exists(live_artifact))
         portrait = self.store.result(session_id).front.portrait
@@ -241,7 +242,7 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         self.assertEqual(FaceMatchStatus.FAILED, record.face_match.status)
         self.assertEqual("FACE_COMPARISON_FAILED", record.face_match.error_code)
         self.assertIsNone(record.face_match.similarity)
-        self.assertEqual(VerificationStatus.IN_PROGRESS, record.status)
+        self.assertEqual(VerificationStatus.FAILED, record.status)
         self.assertFalse(self.artifacts.exists(document_artifact))
         self.assertFalse(self.artifacts.exists(live_artifact))
         with self.assertRaises(ValueError):
@@ -543,7 +544,7 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
                     jobs.shutdown()
                     dispatcher.shutdown()
 
-    def test_disabled_matching_never_completes_verification(self) -> None:
+    def test_disabled_matching_is_not_required_for_completion(self) -> None:
         artifacts = InMemoryPortraitArtifactStore()
         store = SessionStore(
             ttl_seconds=60, max_sessions=1, portrait_artifacts=artifacts, face_match_enabled=False
@@ -560,7 +561,7 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         store.complete_liveness(session_id, LivenessResult(True, 0.9, 3, 3), live, True)
         snapshot = store.get(session_id)
         self.assertEqual(FaceMatchStatus.BLOCKED, snapshot.face_match_status)
-        self.assertEqual(VerificationStatus.IN_PROGRESS, snapshot.verification_status)
+        self.assertEqual(VerificationStatus.COMPLETED, snapshot.verification_status)
 
     def test_cleanup_failure_preserves_successful_match_and_final_completion(self) -> None:
         session_id = self.store.create().session_id

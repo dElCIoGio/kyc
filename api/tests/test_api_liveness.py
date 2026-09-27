@@ -245,7 +245,9 @@ class VerificationManagerLivenessTests(unittest.TestCase):
             self.assertFalse(submission.result.passed)
             self.assertEqual("failed", submission.snapshot.liveness_status.value)
             self.assertEqual("PASSIVE_LIVENESS_FAILED", store._records[session_id].liveness.error_code)
-            self.assertEqual(["liveness.started", "liveness.failed"], events)
+            self.assertEqual(
+                ["liveness.started", "liveness.failed", "verification.failed"], events
+            )
         finally:
             executor.shutdown()
 
@@ -296,7 +298,9 @@ class VerificationManagerLivenessTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "usable face"):
                 manager.submit_liveness(session_id, [PNG_BYTES] * 3)
             self.assertEqual("failed", store.get(session_id).liveness_status.value)
-            self.assertEqual(["liveness.started", "liveness.failed"], events)
+            self.assertEqual(
+                ["liveness.started", "liveness.failed", "verification.failed"], events
+            )
         finally:
             executor.shutdown()
 

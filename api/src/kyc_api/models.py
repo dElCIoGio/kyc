@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 class VerificationStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    FAILED = "failed"
     VERIFIED = "verified"
     REJECTED = "rejected"
     EXPIRED = "expired"

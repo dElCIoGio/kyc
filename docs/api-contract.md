@@ -24,6 +24,12 @@ When it is required, only `face_comparison.status: "completed"` succeeds and
 configured for this verification and is excluded from the aggregation; it is
 never treated as successful when comparison is required.
 
+The extraction engine reports `partial` when required document evidence is
+missing, invalid, conflicting, or errored. The detailed result retains
+`document.status: "partial"` for diagnostics, but the public session treats
+that outcome as a terminal document failure: `document.status: "failed"` and
+session `status: "failed"`. It cannot complete a verification.
+
 | Authoritative state | Public status | `next_action` |
 | --- | --- | --- |
 | Front absent | `in_progress` | `submit_document_front` |
@@ -121,9 +127,12 @@ Webhooks are PII-minimal and delivered at least once. Types are
 ```
 
 Consumers verify the existing HMAC headers, deduplicate by `id`, and retrieve
-the session or result instead of expecting PII in a webhook. Errors always use
-`{"error":{"code":"...","message":"..."}}`; messages are safe and do
-not contain internal exception detail.
+the session or result instead of expecting PII in a webhook. When a required
+subsystem fails, its subsystem event is delivered before the paired
+`verification.processing.failed` event for the same transition. The outbox
+deduplicates by session, sequence, and event type, so both events coexist.
+Errors always use `{"error":{"code":"...","message":"..."}}`; messages
+are safe and do not contain internal exception detail.
 
 ## Browser credential boundary
 

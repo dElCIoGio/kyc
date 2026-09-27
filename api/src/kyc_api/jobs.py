@@ -87,6 +87,7 @@ class JobManager:
                 )
                 if failed is not None:
                     self._publish(failed, "document.failed")
+                    self._publish(failed, "verification.failed")
             self._slots.release()
             raise
 
@@ -147,6 +148,7 @@ class JobManager:
                 self._coordinator.release_pending_artifacts(result)
                 span.set_attribute("kyc.processing_status", "failed")
                 self._publish(completed, "document.failed")
+                self._publish(completed, "verification.failed")
                 self._metrics.record_job("failed", (perf_counter() - started) * 1000.0)
             else:
                 transition_reason = {
@@ -169,8 +171,12 @@ class JobManager:
                         "duration_ms": round(duration_ms, 3),
                     },
                 )
-                if result.status == ProcessingStatus.SUCCESS:
+                if result.status == ProcessingStatus.PARTIAL:
+                    self._publish(completed, "verification.failed")
+                elif result.status == ProcessingStatus.SUCCESS:
                     post_document_callback = completed
+                    if completed.verification_status.value == "completed":
+                        self._publish(completed, "verification.completed")
         except Exception as exc:
             if result is not None:
                 self._coordinator.release_pending_artifacts(result)
@@ -191,6 +197,7 @@ class JobManager:
             )
             if failed is not None:
                 self._publish(failed, "document.failed")
+                self._publish(failed, "verification.failed")
                 self._metrics.record_job("failed", duration_ms)
         finally:
             if timeout_timer is not None:
@@ -204,6 +211,7 @@ class JobManager:
             timed_out = self._store.timeout_document_processing(session_id, job_id)
             if timed_out is not None:
                 self._publish(timed_out, "document.failed")
+                self._publish(timed_out, "verification.failed")
                 self._metrics.record_error("JOB_TIMEOUT")
                 self._metrics.record_job("timeout", self._timeout_seconds * 1000.0)
                 logger.warning(

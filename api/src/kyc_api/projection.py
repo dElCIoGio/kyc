@@ -30,7 +30,7 @@ _DOCUMENT_ACTIVE = {
     DocumentStatus.QUEUED,
     DocumentStatus.PROCESSING,
 }
-_DOCUMENT_SUCCEEDED = {DocumentStatus.PASSED, DocumentStatus.PARTIAL}
+_DOCUMENT_SUCCEEDED = {DocumentStatus.PASSED}
 
 
 def session_response(snapshot: SessionSnapshot) -> SessionResponse:
@@ -108,7 +108,13 @@ def result_response(
 
 
 def _session_status(snapshot: SessionSnapshot) -> SessionStatus:
-    document_failed = snapshot.document.status == DocumentStatus.FAILED
+    # The engine uses PARTIAL when required document evidence is missing,
+    # invalid, conflicting, or otherwise errored. It remains available in the
+    # detailed result, but cannot satisfy the public technical workflow.
+    document_failed = snapshot.document.status in {
+        DocumentStatus.PARTIAL,
+        DocumentStatus.FAILED,
+    }
     liveness_failed = snapshot.liveness_required and snapshot.liveness_status == LivenessStatus.FAILED
     comparison_failed = snapshot.face_match_required and snapshot.face_match_status == FaceMatchStatus.FAILED
     if document_failed or liveness_failed or comparison_failed:
@@ -146,7 +152,7 @@ def _document_status(status: DocumentStatus) -> PublicDocumentStatus:
         return PublicDocumentStatus.AWAITING_CAPTURE
     if status in _DOCUMENT_ACTIVE:
         return PublicDocumentStatus.PROCESSING
-    if status == DocumentStatus.FAILED:
+    if status in {DocumentStatus.PARTIAL, DocumentStatus.FAILED}:
         return PublicDocumentStatus.FAILED
     return PublicDocumentStatus.COMPLETED
 

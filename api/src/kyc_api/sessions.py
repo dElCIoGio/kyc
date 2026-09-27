@@ -133,6 +133,7 @@ class SessionStore:
     _DOCUMENT_RESULTS = {DocumentStatus.PASSED, DocumentStatus.PARTIAL, DocumentStatus.FAILED}
     _VERIFICATION_TERMINAL = {
         VerificationStatus.COMPLETED,
+        VerificationStatus.FAILED,
         VerificationStatus.VERIFIED,
         VerificationStatus.REJECTED,
         VerificationStatus.EXPIRED,
@@ -300,6 +301,7 @@ class SessionStore:
                 document.result = None
                 document.error_code = "PORTRAIT_ARTIFACT_CLAIM_FAILED"
                 document.status = DocumentStatus.FAILED
+                self._refresh_verification_failure(record)
                 record.event_sequence += 1
                 self._refresh_expiry(record)
                 return _snapshot(record)
@@ -312,6 +314,8 @@ class SessionStore:
                 ProcessingStatus.FAILED: DocumentStatus.FAILED,
             }[result.status]
             self._refresh_face_match_readiness(record)
+            self._refresh_verification_completion(record)
+            self._refresh_verification_failure(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -333,6 +337,7 @@ class SessionStore:
             document.result = None
             document.error_code = code
             document.status = DocumentStatus.FAILED
+            self._refresh_verification_failure(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -351,6 +356,7 @@ class SessionStore:
             document.result = None
             document.error_code = "JOB_TIMEOUT"
             document.status = DocumentStatus.FAILED
+            self._refresh_verification_failure(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -404,6 +410,8 @@ class SessionStore:
                 None if result.passed else "PASSIVE_LIVENESS_FAILED"
             )
             self._refresh_face_match_readiness(record)
+            self._refresh_verification_completion(record)
+            self._refresh_verification_failure(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -438,6 +446,7 @@ class SessionStore:
             record.face_match.status = FaceMatchStatus.COMPLETED
             record.face_match.similarity = float(similarity)
             record.face_match.error_code = None
+            self._refresh_verification_completion(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -456,6 +465,7 @@ class SessionStore:
             record.face_match.status = FaceMatchStatus.FAILED
             record.face_match.similarity = None
             record.face_match.error_code = code
+            self._refresh_verification_failure(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -516,6 +526,7 @@ class SessionStore:
             record.liveness.result = None
             record.liveness.error_code = code
             record.liveness.status = LivenessStatus.FAILED
+            self._refresh_verification_failure(record)
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
@@ -611,7 +622,7 @@ class SessionStore:
     def _refresh_face_match_readiness(self, record: _SessionRecord) -> bool:
         """Advance only BLOCKED sessions once every configured input is usable."""
         if (
-            not self._face_match_enabled
+            not record.face_match_required
             or record.face_match.status != FaceMatchStatus.BLOCKED
             or record.status != VerificationStatus.IN_PROGRESS
             or record.document.status != DocumentStatus.PASSED
@@ -625,15 +636,33 @@ class SessionStore:
         return True
 
     def _refresh_verification_completion(self, record: _SessionRecord) -> bool:
+        if record.status != VerificationStatus.IN_PROGRESS:
+            return False
+        if record.document.status != DocumentStatus.PASSED:
+            return False
+        if record.liveness_required and record.liveness.status != LivenessStatus.PASSED:
+            return False
         if (
-            record.status != VerificationStatus.IN_PROGRESS
-            or record.document.status != DocumentStatus.PASSED
-            or record.liveness.status != LivenessStatus.PASSED
-            or record.face_match.status != FaceMatchStatus.COMPLETED
+            record.face_match_required
+            and record.face_match.status != FaceMatchStatus.COMPLETED
         ):
             return False
         record.status = VerificationStatus.COMPLETED
         return True
+
+    def _refresh_verification_failure(self, record: _SessionRecord) -> bool:
+        if record.status != VerificationStatus.IN_PROGRESS:
+            return False
+        if record.document.status in {DocumentStatus.PARTIAL, DocumentStatus.FAILED}:
+            record.status = VerificationStatus.FAILED
+            return True
+        if record.liveness_required and record.liveness.status == LivenessStatus.FAILED:
+            record.status = VerificationStatus.FAILED
+            return True
+        if record.face_match_required and record.face_match.status == FaceMatchStatus.FAILED:
+            record.status = VerificationStatus.FAILED
+            return True
+        return False
 
     def _purge_expired(self, now: datetime) -> int:
         self._expired = {

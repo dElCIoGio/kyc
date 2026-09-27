@@ -6,9 +6,9 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from kyc_engine import LivenessResult
+from kyc_engine import LivenessResult, ProcessingStatus
 from kyc_api.main import create_app
-from kyc_api.models import CaptureStatus, DocumentSide, DocumentStatus, FaceMatchStatus, LivenessStatus
+from kyc_api.models import CaptureStatus, DocumentSide, DocumentStatus, FaceMatchStatus, LivenessStatus, VerificationStatus
 from kyc_api.projection import result_response, session_response
 from kyc_api.sessions import SessionStore, _now
 
@@ -61,6 +61,27 @@ class PublicSessionContractTests(unittest.TestCase):
         completed = session_response(liveness_complete)
         self.assertEqual("completed", completed.status)
         self.assertIsNone(completed.next_action)
+        self.assertEqual(VerificationStatus.COMPLETED, liveness_complete.verification_status)
+
+    def test_partial_document_is_terminally_failed_but_remains_detailed_in_result(self) -> None:
+        store = SessionStore(ttl_seconds=60, max_sessions=1, liveness_required=False)
+        session_id = store.create().session_id
+        accept_document(store, session_id)
+        job_id = store.queue_document_processing(session_id).document.job_id
+        assert job_id is not None
+        store.start_document_processing(session_id, job_id)
+        completed = store.complete_document_processing(
+            session_id, job_id, extraction_result(ProcessingStatus.PARTIAL)
+        )
+        assert completed is not None
+
+        session = session_response(completed)
+        self.assertEqual("failed", session.status)
+        self.assertEqual("failed", session.document.status)
+        self.assertIsNone(session.next_action)
+        self.assertEqual(
+            "partial", result_response(completed, store.result(session_id)).document.status
+        )
 
     def test_required_face_comparison_must_finish_or_fail(self) -> None:
         store = SessionStore(ttl_seconds=60, max_sessions=1, face_match_enabled=True)

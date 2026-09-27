@@ -225,8 +225,14 @@ class VerificationManager:
         transition_reason = "liveness.passed" if result.passed else "liveness.failed"
         self._publish(snapshot, transition_reason)
         logger.info("liveness completed", extra={"event": transition_reason})
+        if not result.passed:
+            if snapshot.liveness_required:
+                self._publish(snapshot, "verification.failed")
+            return snapshot
         if self._orchestrator is not None:
             self._orchestrator.on_liveness_state_changed(snapshot)
+        if snapshot.verification_status.value == "completed":
+            self._publish(snapshot, "verification.completed")
         return snapshot
 
     def _log_live_face_selection(self, selection) -> None:
@@ -253,6 +259,8 @@ class VerificationManager:
         snapshot = self._store.fail_liveness(session_id, code)
         if snapshot is not None:
             self._publish(snapshot, "liveness.failed")
+            if snapshot.liveness_required:
+                self._publish(snapshot, "verification.failed")
             logger.warning(
                 "liveness failed",
                 extra={"event": "liveness.failed", "error_code": code},

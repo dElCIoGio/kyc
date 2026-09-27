@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -95,14 +96,34 @@ class WebhookOutbox:
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
+    @contextmanager
+    def _connection(self):
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(webhook_events)")
+            }
+            migrate_legacy_schema = bool(columns) and "event_type" not in columns
+            if migrate_legacy_schema:
+                connection.execute("DROP INDEX IF EXISTS webhook_events_due")
+                connection.execute(
+                    "ALTER TABLE webhook_events RENAME TO webhook_events_legacy"
+                )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS webhook_events (
                     event_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
                     sequence INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
                     payload BLOB NOT NULL,
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
@@ -110,26 +131,45 @@ class WebhookOutbox:
                     next_attempt_at REAL NOT NULL,
                     delivered_at REAL,
                     dead_at REAL,
-                    UNIQUE(session_id, sequence)
+                    UNIQUE(session_id, sequence, event_type)
                 );
                 CREATE INDEX IF NOT EXISTS webhook_events_due
-                    ON webhook_events(next_attempt_at, session_id, sequence);
+                    ON webhook_events(next_attempt_at, session_id, sequence, event_type);
                 """
             )
+            if migrate_legacy_schema:
+                connection.execute(
+                    """INSERT INTO webhook_events
+                    (event_id, session_id, sequence, event_type, payload, created_at,
+                     expires_at, attempts, next_attempt_at, delivered_at, dead_at)
+                    SELECT event_id, session_id, sequence, 'legacy', payload, created_at,
+                           expires_at, attempts, next_attempt_at, delivered_at, dead_at
+                    FROM webhook_events_legacy"""
+                )
+                connection.execute("DROP TABLE webhook_events_legacy")
 
     def enqueue(self, event: WebhookEvent) -> None:
         now = time.time()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 """INSERT OR IGNORE INTO webhook_events
-                (event_id, session_id, sequence, payload, created_at, expires_at, next_attempt_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (event.event_id, event.session_id, event.sequence, event.payload(), now, now + self._retention_seconds, now),
+                (event_id, session_id, sequence, event_type, payload, created_at, expires_at, next_attempt_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event.event_id,
+                    event.session_id,
+                    event.sequence,
+                    event.event_type,
+                    event.payload(),
+                    now,
+                    now + self._retention_seconds,
+                    now,
+                ),
             )
 
     def due(self) -> _StoredEvent | None:
         now = time.time()
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 "UPDATE webhook_events SET dead_at = ? WHERE delivered_at IS NULL AND dead_at IS NULL AND expires_at <= ?",
                 (now, now),
@@ -141,26 +181,33 @@ class WebhookOutbox:
                   AND NOT EXISTS (
                     SELECT 1 FROM webhook_events earlier
                     WHERE earlier.session_id = current.session_id
-                      AND earlier.sequence < current.sequence
+                      AND (
+                        earlier.sequence < current.sequence
+                        OR (
+                          earlier.sequence = current.sequence
+                          AND earlier.event_type < current.event_type
+                        )
+                      )
                       AND earlier.delivered_at IS NULL AND earlier.dead_at IS NULL
                   )
-                ORDER BY current.created_at, current.sequence LIMIT 1""",
+                ORDER BY current.created_at, current.session_id, current.sequence,
+                         current.event_type LIMIT 1""",
                 (now,),
             ).fetchone()
         return _StoredEvent(*row) if row is not None else None
 
     def delivered(self, event_id: str) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute("UPDATE webhook_events SET delivered_at = ? WHERE event_id = ?", (time.time(), event_id))
 
     def failed(self, event_id: str, attempts: int, *, retry_after: float | None, retryable: bool) -> None:
         now = time.time()
         if not retryable:
-            with self._lock, self._connect() as connection:
+            with self._lock, self._connection() as connection:
                 connection.execute("UPDATE webhook_events SET attempts = ?, dead_at = ? WHERE event_id = ?", (attempts + 1, now, event_id))
             return
         delay = min(300.0, retry_after if retry_after is not None else float(2 ** min(attempts, 8)))
-        with self._lock, self._connect() as connection:
+        with self._lock, self._connection() as connection:
             connection.execute(
                 "UPDATE webhook_events SET attempts = ?, next_attempt_at = ? WHERE event_id = ?",
                 (attempts + 1, now + max(1.0, delay), event_id),
@@ -242,10 +289,10 @@ def _event_type(transition_reason: str) -> str | None:
     return {
         "verification.session.created": "verification.session.created",
         "document.passed": "verification.document.completed",
-        "document.partial": "verification.document.completed",
+        "document.partial": "verification.document.failed",
         "document.failed": "verification.document.failed",
         "liveness.passed": "verification.liveness.passed",
         "liveness.failed": "verification.liveness.failed",
-        "face_match.failed": "verification.processing.failed",
+        "verification.failed": "verification.processing.failed",
         "verification.completed": "verification.processing.completed",
     }.get(transition_reason)

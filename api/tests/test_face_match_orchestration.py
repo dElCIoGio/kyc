@@ -97,16 +97,21 @@ class _InlineExecutor:
 class _QueuedExecutor:
     def __init__(self) -> None:
         self.tasks: list[tuple[Future, object, tuple, dict]] = []
+        self.submissions = 0
 
     def submit(self, function, *args, **kwargs) -> Future:
         future = Future()
         self.tasks.append((future, function, args, kwargs))
+        self.submissions += 1
         return future
 
-    def run_next(self) -> None:
+    def run_next(self, *, before_completion=None) -> None:
         future, function, args, kwargs = self.tasks.pop(0)
         try:
-            future.set_result(function(*args, **kwargs))
+            result = function(*args, **kwargs)
+            if before_completion is not None:
+                before_completion()
+            future.set_result(result)
         except BaseException as exc:
             future.set_exception(exc)
 
@@ -311,6 +316,54 @@ class FaceMatchOrchestrationTests(unittest.TestCase):
         self.assertEqual(1, len(executor.tasks))
         executor.run_next()
         self.assertTrue(dispatcher.schedule("second", lambda _session_id: None))
+
+    def test_shutdown_rejects_active_session_trigger_and_drains_original_task(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            dispatcher = FaceMatchDispatcher(workers=1, capacity=1, executor=executor)
+
+            def blocked_attempt(_session_id: str) -> None:
+                nonlocal calls
+                calls += 1
+                started.set()
+                self.assertTrue(release.wait(timeout=1))
+
+            self.assertTrue(dispatcher.schedule("session", blocked_attempt))
+            self.assertTrue(started.wait(timeout=1))
+            dispatcher.shutdown()
+            self.assertFalse(dispatcher.schedule("session", blocked_attempt))
+            self.assertFalse(dispatcher._scheduled["session"].follow_up_needed)
+            release.set()
+            executor.submit(lambda: None).result(timeout=1)
+
+            self.assertEqual(1, calls)
+            self.assertNotIn("session", dispatcher._scheduled)
+            self.assertFalse(dispatcher.schedule("new-session", blocked_attempt))
+
+    def test_closed_dispatcher_drops_deferred_follow_up_without_resubmitting(self) -> None:
+        executor = _QueuedExecutor()
+        dispatcher = FaceMatchDispatcher(workers=1, capacity=1, executor=executor)
+        calls = 0
+
+        def attempt(_session_id: str) -> None:
+            nonlocal calls
+            calls += 1
+
+        self.assertTrue(dispatcher.schedule("session", attempt))
+
+        def close_with_deferred_follow_up() -> None:
+            self.assertTrue(dispatcher.schedule("session", attempt))
+            dispatcher.shutdown()
+
+        executor.run_next(before_completion=close_with_deferred_follow_up)
+
+        self.assertEqual(1, calls)
+        self.assertEqual(1, executor.submissions)
+        self.assertEqual([], executor.tasks)
+        self.assertNotIn("session", dispatcher._scheduled)
+        self.assertFalse(dispatcher.schedule("session", attempt))
 
     def test_ready_transition_during_active_attempt_runs_one_coalesced_follow_up(self) -> None:
         session_id = self.store.create().session_id

@@ -62,13 +62,13 @@ class FaceMatchDispatcher:
     def schedule(self, session_id: str, attempt: Callable[[str], object]) -> bool:
         """Coalesce a trigger, or submit one bounded task for its session."""
         with self._lock:
+            if self._closed:
+                self._log_schedule_failure("FaceMatchDispatcherClosed", "FACE_MATCH_SCHEDULER_CLOSED")
+                return False
             active = self._scheduled.get(session_id)
             if active is not None:
                 active.follow_up_needed = True
                 return True
-            if self._closed:
-                self._log_schedule_failure("FaceMatchDispatcherClosed", "FACE_MATCH_SCHEDULER_CLOSED")
-                return False
             if not self._slots.acquire(blocking=False):
                 self._log_schedule_failure(
                     "FaceMatchCapacityExceeded", "FACE_MATCH_SCHEDULING_CAPACITY_EXCEEDED"
@@ -160,6 +160,10 @@ class FaceMatchDispatcher:
     ) -> None:
         with self._lock:
             if self._scheduled.get(session_id) is not scheduled:
+                return
+            if self._closed:
+                del self._scheduled[session_id]
+                self._slots.release()
                 return
             if not scheduled.follow_up_needed:
                 del self._scheduled[session_id]

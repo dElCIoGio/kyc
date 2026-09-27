@@ -23,6 +23,17 @@ resources and its optional dependency:
 python -m pip install -e ".[ocr,liveness]"
 ```
 
+Face recognition remains disabled and absent from the default API install. For
+local development/testing with separately provisioned ONNX files only:
+
+```powershell
+python -m pip install -e "api[recognition]"
+```
+
+Current InsightFace pretrained packs are development/test-only unless the exact
+weights have separately confirmed commercial-use rights. The service never
+downloads recognition models.
+
 ## Configuration
 
 Required environment variables:
@@ -48,6 +59,9 @@ KYC_LIVENESS_MODEL_ROOT=private-models/liveness/minifasnet
 KYC_LIVENESS_FRAME_COUNT=3
 KYC_LIVENESS_MIN_REAL_RATIO=0.6666666667
 KYC_MAX_LIVENESS_FRAME_BYTES=5242880
+KYC_FACE_RECOGNITION_ENABLED=false
+KYC_FACE_RECOGNITION_MODEL_ROOT=private-models/recognition
+KYC_FACE_RECOGNITION_MODEL_ID=development-pack
 KYC_SESSION_TTL_SECONDS=1800
 KYC_MAX_SESSIONS=100
 KYC_JOB_WORKERS=1

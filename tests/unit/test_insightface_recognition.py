@@ -3,12 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType
+from unittest.mock import patch
 
 import numpy as np
 
 from kyc_engine import (
     FaceRecognitionInferenceError,
+    FaceRecognitionInitializationError,
     FaceRecognitionMultipleFacesError,
     FaceRecognitionNoFaceError,
     InsightFaceRecognizer,
@@ -16,112 +17,219 @@ from kyc_engine import (
 
 
 class _Face:
-    def __init__(self, embedding: object | None = None, score: float = 0.8) -> None:
-        self.embedding = embedding
-        self.det_score = score
+    def __init__(self, **attributes: object) -> None:
+        for name, value in attributes.items():
+            setattr(self, name, value)
 
 
-class _Analysis:
-    def __init__(self, faces: list[_Face]) -> None:
-        self.models = {"detection": object(), "recognition": object()}
-        self.faces = faces
-        self.prepared = False
+class _DetectionModel:
+    taskname = "detection"
+
+    def __init__(self, rows: np.ndarray | None = None, landmarks: np.ndarray | None = None) -> None:
+        self.rows = np.asarray(rows) if rows is not None else np.array([[1, 2, 7, 8, 0.8]], dtype=np.float32)
+        self.landmarks = (
+            np.asarray(landmarks)
+            if landmarks is not None
+            else np.array([[[2, 3], [6, 3], [4, 5], [3, 7], [5, 7]]], dtype=np.float32)
+        )
+        self.prepare_calls: list[tuple[int, tuple[int, int] | None]] = []
         self.images: list[np.ndarray] = []
 
-    def prepare(self, *, ctx_id: int) -> None:
-        self.prepared = ctx_id == 0
+    def prepare(self, *, ctx_id: int, input_size: tuple[int, int] | None = None) -> None:
+        self.prepare_calls.append((ctx_id, input_size))
 
-    def get(self, image: np.ndarray) -> list[_Face]:
+    def detect(self, image: np.ndarray, *, max_num: int) -> tuple[np.ndarray, np.ndarray]:
         self.images.append(image)
-        return self.faces
+        assert max_num == 0
+        return self.rows, self.landmarks
+
+
+class _RecognitionModel:
+    taskname = "recognition"
+
+    def __init__(self, embedding: object | None = None) -> None:
+        self.embedding = embedding if embedding is not None else np.array([1.0, 2.0])
+        self.prepare_calls: list[tuple[int, tuple[int, int] | None]] = []
+        self.faces: list[_Face] = []
+        self.images: list[np.ndarray] = []
+
+    def prepare(self, *, ctx_id: int, input_size: tuple[int, int] | None = None) -> None:
+        self.prepare_calls.append((ctx_id, input_size))
+
+    def get(self, image: np.ndarray, face: _Face) -> None:
+        self.images.append(image)
+        self.faces.append(face)
+        if self.embedding is not None:
+            face.embedding = self.embedding
+
+
+class _OtherModel:
+    taskname = "landmark_3d_68"
 
 
 class InsightFaceRecognizerTests(unittest.TestCase):
-    def _package(self, temporary: str, model_id: str = "development") -> Path:
-        model_dir = Path(temporary) / "models" / model_id
+    def _package(self, temporary: str, files: dict[str, str]) -> Path:
+        model_dir = Path(temporary) / "models" / "development"
         model_dir.mkdir(parents=True)
-        (model_dir / "det.onnx").write_bytes(b"model")
+        for name, role in files.items():
+            (model_dir / name).write_text(role, encoding="ascii")
         return Path(temporary)
 
-    def test_uses_one_faceanalysis_result_for_detection_and_embedding(self) -> None:
+    def _loader(self, models: dict[str, object], calls: list[tuple[str, object]]):
+        def load(path: str, *, providers: object):
+            calls.append((path, providers))
+            role = Path(path).read_text(encoding="ascii")
+            if role == "broken":
+                raise RuntimeError("unsupported unrelated model")
+            return models[role]
+
+        return load
+
+    def test_discovers_tasks_from_local_models_and_preserves_detector_face_for_recognition(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            analysis = _Analysis([_Face(np.array([1.0, 2.0]))])
+            root = self._package(
+                temporary,
+                {"not-a-role-name.onnx": "det", "anything.onnx": "rec", "extra.onnx": "other"},
+            )
+            detector = _DetectionModel()
+            recognition = _RecognitionModel()
+            calls: list[tuple[str, object]] = []
             recognizer = InsightFaceRecognizer(
-                self._package(temporary),
+                root,
                 "development",
-                _analysis_factory=lambda **kwargs: self._assert_cpu_factory_args(kwargs, analysis),
+                _model_loader=self._loader(
+                    {"det": detector, "rec": recognition, "other": _OtherModel()}, calls
+                ),
+                _face_factory=_Face,
             )
             source = np.zeros((8, 8, 3), dtype=np.uint8)
             source.setflags(write=False)
 
             result = recognizer.encode(source)
 
-        self.assertTrue(analysis.prepared)
+        self.assertEqual(3, len(calls))
+        self.assertTrue(all(providers == ["CPUExecutionProvider"] for _, providers in calls))
+        self.assertEqual([(-1, (640, 640))], detector.prepare_calls)
+        self.assertEqual([(-1, None)], recognition.prepare_calls)
         self.assertEqual(1, result.face_count)
-        self.assertEqual(0.8, result.detection_confidence)
+        self.assertAlmostEqual(0.8, result.detection_confidence)
         np.testing.assert_array_equal(np.array([1.0, 2.0]), result.embedding.vector)
-        self.assertEqual(1, len(analysis.images))
-        self.assertTrue(analysis.images[0].flags.writeable)
-        self.assertIsNot(analysis.images[0], source)
+        self.assertEqual(1, len(detector.images))
+        self.assertIs(detector.images[0], recognition.images[0])
+        self.assertTrue(detector.images[0].flags.writeable)
+        self.assertIsNot(detector.images[0], source)
+        self.assertEqual(1, len(recognition.faces))
+        np.testing.assert_array_equal(np.array([1, 2, 7, 8], dtype=np.float32), recognition.faces[0].bbox)
+        np.testing.assert_array_equal(detector.landmarks[0], recognition.faces[0].kps)
 
-    def test_zero_or_multiple_faces_are_rejected_without_embedding_selection(self) -> None:
-        for faces, error in (([], FaceRecognitionNoFaceError), ([_Face([1]), _Face([2])], FaceRecognitionMultipleFacesError)):
-            with self.subTest(face_count=len(faces)), tempfile.TemporaryDirectory() as temporary:
+    def test_unrelated_or_unloadable_models_do_not_block_required_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self._package(
+                temporary,
+                {"a.onnx": "det", "b.onnx": "rec", "c.onnx": "other", "d.onnx": "broken"},
+            )
+            recognizer = InsightFaceRecognizer(
+                root,
+                "development",
+                _model_loader=self._loader(
+                    {"det": _DetectionModel(), "rec": _RecognitionModel(), "other": _OtherModel()}, []
+                ),
+                _face_factory=_Face,
+            )
+
+        self.assertIsNotNone(recognizer)
+
+    def test_missing_or_ambiguous_required_roles_fail_startup(self) -> None:
+        cases = (
+            {"detector.onnx": "det", "other.onnx": "other"},
+            {"one.onnx": "det", "two.onnx": "det", "rec.onnx": "rec"},
+            {"det.onnx": "det", "one.onnx": "rec", "two.onnx": "rec"},
+        )
+        for files in cases:
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as temporary:
+                root = self._package(temporary, files)
+                with self.assertRaisesRegex(FaceRecognitionInitializationError, "exactly one usable"):
+                    InsightFaceRecognizer(
+                        root,
+                        "development",
+                        _model_loader=self._loader(
+                            {"det": _DetectionModel(), "rec": _RecognitionModel(), "other": _OtherModel()}, []
+                        ),
+                        _face_factory=_Face,
+                    )
+
+    def test_zero_or_multiple_faces_are_rejected_before_recognition(self) -> None:
+        cases = (
+            (np.empty((0, 5), dtype=np.float32), FaceRecognitionNoFaceError),
+            (np.array([[1, 2, 7, 8, 0.8], [2, 3, 8, 9, 0.9]], dtype=np.float32), FaceRecognitionMultipleFacesError),
+        )
+        for rows, error in cases:
+            with self.subTest(face_count=len(rows)), tempfile.TemporaryDirectory() as temporary:
+                root = self._package(temporary, {"detector.onnx": "det", "recognizer.onnx": "rec"})
+                recognition = _RecognitionModel()
                 recognizer = InsightFaceRecognizer(
-                    self._package(temporary),
+                    root,
                     "development",
-                    _analysis_factory=lambda **_kwargs: _Analysis(faces),
+                    _model_loader=self._loader(
+                        {"det": _DetectionModel(rows=rows), "rec": recognition}, []
+                    ),
+                    _face_factory=_Face,
                 )
                 with self.assertRaises(error):
                     recognizer.encode(np.zeros((8, 8, 3), dtype=np.uint8))
+                self.assertEqual([], recognition.faces)
 
-    def test_missing_embedding_is_an_inference_failure(self) -> None:
+    def test_missing_landmarks_or_embedding_is_an_inference_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            recognizer = InsightFaceRecognizer(
-                self._package(temporary),
+            root = self._package(temporary, {"detector.onnx": "det", "recognizer.onnx": "rec"})
+            missing_landmarks = InsightFaceRecognizer(
+                root,
                 "development",
-                _analysis_factory=lambda **_kwargs: _Analysis([_Face()]),
+                _model_loader=self._loader(
+                    {"det": _DetectionModel(landmarks=None), "rec": _RecognitionModel()}, []
+                ),
+                _face_factory=_Face,
+            )
+            missing_landmarks._detector.landmarks = None
+            with self.assertRaises(FaceRecognitionInferenceError):
+                missing_landmarks.encode(np.zeros((8, 8, 3), dtype=np.uint8))
+
+            recognition_without_embedding = _RecognitionModel()
+            recognition_without_embedding.embedding = None
+            missing_embedding = InsightFaceRecognizer(
+                root,
+                "development",
+                _model_loader=self._loader(
+                    {"det": _DetectionModel(), "rec": recognition_without_embedding}, []
+                ),
+                _face_factory=_Face,
             )
             with self.assertRaises(FaceRecognitionInferenceError):
-                recognizer.encode(np.zeros((8, 8, 3), dtype=np.uint8))
+                missing_embedding.encode(np.zeros((8, 8, 3), dtype=np.uint8))
 
-    def test_missing_package_fails_before_loader_construction(self) -> None:
+    def test_default_loader_uses_direct_model_zoo_api_without_download_hook(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(Exception, "model package"):
-                InsightFaceRecognizer(
-                    Path(temporary), "development", _analysis_factory=lambda **_kwargs: self.fail("loader called")
-                )
-
-    def test_default_loader_disables_automatic_downloads(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = self._package(temporary)
-            module = ModuleType("face_analysis")
-            download_calls: list[object] = []
-
-            def original_download(*_args, **_kwargs):
-                download_calls.append("download")
-                raise AssertionError("automatic download attempted")
-
-            module.ensure_available = original_download
-            analysis = _Analysis([_Face([1.0])])
-
-            def factory(**kwargs):
-                self.assertEqual(str(root / "models" / "development"), module.ensure_available("models", "development", root=kwargs["root"]))
-                return analysis
-
-            from unittest.mock import patch
-
-            with patch("kyc_engine.insightface_recognition._load_face_analysis", return_value=(factory, module)):
+            root = self._package(temporary, {"detector.onnx": "det", "recognizer.onnx": "rec"})
+            calls: list[tuple[str, object]] = []
+            with patch(
+                "kyc_engine.insightface_recognition._load_insightface_apis",
+                return_value=(
+                    self._loader({"det": _DetectionModel(), "rec": _RecognitionModel()}, calls),
+                    _Face,
+                ),
+            ) as local_apis:
                 recognizer = InsightFaceRecognizer(root, "development")
 
         self.assertIsNotNone(recognizer)
-        self.assertEqual([], download_calls)
+        local_apis.assert_called_once_with()
+        self.assertEqual(2, len(calls))
 
-    def _assert_cpu_factory_args(self, kwargs: dict[str, object], analysis: _Analysis) -> _Analysis:
-        self.assertEqual(("detection", "recognition"), kwargs["allowed_modules"])
-        self.assertEqual((), kwargs["addons"])
-        self.assertEqual(["CPUExecutionProvider"], kwargs["providers"])
-        return analysis
+    def test_missing_package_fails_before_model_api_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(FaceRecognitionInitializationError, "model package"):
+                InsightFaceRecognizer(
+                    Path(temporary), "development", _model_loader=lambda **_kwargs: self.fail("loader called"), _face_factory=_Face
+                )
 
 
 if __name__ == "__main__":

@@ -41,6 +41,12 @@ Install optional local inference dependencies only where needed:
 .\.venv\Scripts\python.exe -m pip install -e ".[ocr,detection]"
 ```
 
+Local, development-only face-recognition experiments additionally require:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[recognition]"
+```
+
 The OCR and ONNX adapters require explicit local model paths and validate configured checksums. Processing never downloads a model.
 
 ## Python Library
@@ -93,6 +99,11 @@ $env:KYC_OCR_MODEL_MANIFEST = "private-models\paddleocr\ao-id-front-v5-mobile\ma
 uvicorn kyc_api.main:app --app-dir api/src --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
+Recognition is disabled by default and is not installed by the API base extra.
+For a locally provisioned development model only, install
+`python -m pip install -e "api[recognition]"`; current InsightFace pretrained
+packs are not approved for commercial or production KYC use.
+
 ### Docker Compose
 
 The root [`docker-compose.yml`](docker-compose.yml) builds the installable
@@ -138,4 +149,5 @@ Only synthetic or irreversibly redacted identity-document fixtures may enter Git
 - [Private PaddleOCR calibration](docs/ocr-calibration.md)
 - [ONNX detector contract](docs/onnx-detector-contract.md)
 - [Optional MiniFASNet passive liveness adapter](docs/minifasnet.md)
+- [Offline face-similarity evaluation](docs/face-evaluation.md)
 - [Architecture decisions](docs/decisions/README.md)

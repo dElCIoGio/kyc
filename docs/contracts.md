@@ -81,14 +81,24 @@ state transition, or embedding persistence. Embeddings exist only during one
 comparison call and are excluded from logs, tracing, metrics, artifacts, and
 serialized responses.
 
-The optional InsightFace adapter uses its own `FaceAnalysis` detection,
-landmarks, alignment, and recognition pipeline, with local CPU ONNX Runtime
-models provisioned through `KYC_FACE_RECOGNITION_MODEL_ROOT` and the safe
+The optional InsightFace adapter directly inspects local ONNX files through
+InsightFace's model APIs and requires exactly one usable detection model and
+one usable recognition model by model task, not filename. Other ONNX roles are
+ignored. The sole detection's own landmarks drive InsightFace's recognition
+alignment and embedding preprocessing, with local CPU ONNX Runtime models
+provisioned through `KYC_FACE_RECOGNITION_MODEL_ROOT` and the safe
 `KYC_FACE_RECOGNITION_MODEL_ID` when `KYC_FACE_RECOGNITION_ENABLED` is true.
-Automatic model downloads are disabled. InsightFace pretrained model packs are
-development/test-only for this project unless commercial-use rights for the
+Automatic model downloads are never invoked. InsightFace pretrained model packs
+are development/test-only for this project unless commercial-use rights for the
 exact weights are confirmed separately; model weights must not be committed to
 this repository.
+
+Offline exploratory evaluation is separate from KYC sessions. Its local CSV
+loader groups consented reference/probe images by opaque subject label, uses the
+same recognizer and raw cosine primitive, and reports only aggregate genuine and
+impostor distributions, histograms, quantiles, and error-rate tables. It never
+retains embeddings or pair-level results, and does not select or recommend an
+operational threshold.
 
 ## Profile Contracts
 

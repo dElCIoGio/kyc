@@ -63,6 +63,18 @@ from .face_recognition import (
     FaceRecognitionMultipleFacesError,
     FaceRecognitionNoFaceError,
 )
+from .face_comparison import (
+    FaceComparisonError,
+    FaceComparisonNonFiniteSimilarityError,
+    FaceEmbeddingDimensionMismatchError,
+    FaceEmbeddingEmptyError,
+    FaceEmbeddingNonFiniteError,
+    FaceEmbeddingValidationError,
+    FaceEmbeddingZeroNormError,
+    compare_face_embeddings,
+    cosine_similarity,
+    validate_face_embedding,
+)
 from .insightface_recognition import InsightFaceRecognizer
 from .intake import IntakeLimits
 from .pipeline import KycPipeline
@@ -101,6 +113,16 @@ __all__ = [
     "FaceRecognitionInitializationError",
     "FaceRecognitionMultipleFacesError",
     "FaceRecognitionNoFaceError",
+    "FaceComparisonError",
+    "FaceComparisonNonFiniteSimilarityError",
+    "FaceEmbeddingDimensionMismatchError",
+    "FaceEmbeddingEmptyError",
+    "FaceEmbeddingNonFiniteError",
+    "FaceEmbeddingValidationError",
+    "FaceEmbeddingZeroNormError",
+    "compare_face_embeddings",
+    "cosine_similarity",
+    "validate_face_embedding",
     "ImageSource",
     "InputImage",
     "IntakeLimits",

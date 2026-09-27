@@ -9,7 +9,7 @@ description = "Session-based FastAPI service for the Angolan KYC engine"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "angolan-kyc-engine[recognition]>=0.1,<0.2",
+    "angolan-kyc-engine>=0.1,<0.2",
     "fastapi>=0.116,<1",
     "opentelemetry-sdk>=1.0,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.0,<2",
@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+recognition = ["angolan-kyc-engine[recognition]>=0.1,<0.2"]
 dev = ["httpx>=0.28,<1"]
 
 [tool.setuptools.packages.find]

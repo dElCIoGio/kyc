@@ -6,8 +6,6 @@ import logging
 from time import perf_counter
 from typing import Literal
 
-import numpy as np
-
 from kyc_engine import (
     FaceComparisonResult,
     FaceEmbedding,
@@ -16,6 +14,17 @@ from kyc_engine import (
     FaceRecognitionNoFaceError,
     FaceRecognizer,
 )
+from kyc_engine.face_comparison import (
+    FaceComparisonError,
+    FaceComparisonNonFiniteSimilarityError,
+    FaceEmbeddingDimensionMismatchError,
+    FaceEmbeddingEmptyError,
+    FaceEmbeddingNonFiniteError,
+    FaceEmbeddingValidationError,
+    FaceEmbeddingZeroNormError,
+    compare_face_embeddings,
+    validate_face_embedding,
+)
 
 from .metrics import MetricsRegistry
 from .sessions import SessionStore
@@ -23,12 +32,6 @@ from .sessions import SessionStore
 
 logger = logging.getLogger(__name__)
 _Role = Literal["reference", "probe"]
-
-
-class FaceComparisonError(RuntimeError):
-    """Base error for the internal face-comparison boundary."""
-
-    code = "FACE_COMPARISON_FAILED"
 
 
 class FaceComparisonReferenceUnavailable(FaceComparisonError):
@@ -45,30 +48,6 @@ class FaceComparisonRecognitionError(FaceComparisonError):
         self.code = code
         self.role = role
         self.face_count = face_count
-
-
-class FaceEmbeddingValidationError(FaceComparisonError):
-    code = "FACE_COMPARISON_INVALID_EMBEDDING"
-
-
-class FaceEmbeddingEmptyError(FaceEmbeddingValidationError):
-    code = "FACE_COMPARISON_EMPTY_EMBEDDING"
-
-
-class FaceEmbeddingZeroNormError(FaceEmbeddingValidationError):
-    code = "FACE_COMPARISON_ZERO_NORM_EMBEDDING"
-
-
-class FaceEmbeddingNonFiniteError(FaceEmbeddingValidationError):
-    code = "FACE_COMPARISON_NONFINITE_EMBEDDING"
-
-
-class FaceEmbeddingDimensionMismatchError(FaceEmbeddingValidationError):
-    code = "FACE_COMPARISON_EMBEDDING_DIMENSION_MISMATCH"
-
-
-class FaceComparisonNonFiniteSimilarityError(FaceComparisonError):
-    code = "FACE_COMPARISON_NONFINITE_SIMILARITY"
 
 
 class FaceComparisonService:
@@ -97,8 +76,7 @@ class FaceComparisonService:
         probe_embedding = self._encode("probe", probe)
         started = perf_counter()
         try:
-            similarity = _cosine_similarity(reference_embedding, probe_embedding)
-            result = FaceComparisonResult(similarity=similarity)
+            result = compare_face_embeddings(reference_embedding, probe_embedding)
         except FaceComparisonError:
             self._record("comparison", "failed", perf_counter() - started)
             raise
@@ -109,7 +87,7 @@ class FaceComparisonService:
         started = perf_counter()
         try:
             result = self._recognizer.encode(image)
-            embedding = _validate_embedding(result.embedding)
+            embedding = validate_face_embedding(result.embedding)
         except FaceRecognitionNoFaceError as exc:
             self._record(role, "failed", perf_counter() - started, face_count=0, error_code="ZERO_FACES")
             raise FaceComparisonRecognitionError(role, f"FACE_COMPARISON_{role.upper()}_ZERO_FACES", 0) from exc
@@ -162,30 +140,3 @@ class FaceComparisonService:
             self._metrics.record_face_comparison(
                 stage=stage, status=status, duration_seconds=duration_seconds
             )
-
-
-def _validate_embedding(embedding: FaceEmbedding) -> FaceEmbedding:
-    vector = np.asarray(embedding.vector, dtype=np.float64)
-    if vector.ndim != 1:
-        raise FaceEmbeddingValidationError("Face embedding must be one-dimensional")
-    if vector.size == 0:
-        raise FaceEmbeddingEmptyError("Face embedding is empty")
-    if not np.all(np.isfinite(vector)):
-        raise FaceEmbeddingNonFiniteError("Face embedding is non-finite")
-    return embedding
-
-
-def _cosine_similarity(reference: FaceEmbedding, probe: FaceEmbedding) -> float:
-    reference_vector = np.asarray(reference.vector, dtype=np.float64)
-    probe_vector = np.asarray(probe.vector, dtype=np.float64)
-    if reference_vector.shape != probe_vector.shape:
-        raise FaceEmbeddingDimensionMismatchError("Face embedding dimensions differ")
-    reference_norm = float(np.linalg.norm(reference_vector))
-    probe_norm = float(np.linalg.norm(probe_vector))
-    if reference_norm == 0.0 or probe_norm == 0.0:
-        raise FaceEmbeddingZeroNormError("Face embedding has zero norm")
-    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        similarity = float(np.dot(reference_vector, probe_vector) / (reference_norm * probe_norm))
-    if not np.isfinite(similarity):
-        raise FaceComparisonNonFiniteSimilarityError("Face comparison similarity is non-finite")
-    return similarity

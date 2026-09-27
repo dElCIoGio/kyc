@@ -49,6 +49,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: api/src/kyc_api/verify/package-lock.json
+
       - name: Upgrade packaging tools
         run: python -m pip install --upgrade pip setuptools wheel
 
@@ -57,7 +64,19 @@ jobs:
           python -m pip install -e .
           python -m pip install -e "api[dev]"
 
+      - name: Build hosted verifier
+        working-directory: api/src/kyc_api/verify
+        run: |
+          npm ci
+          npm run check
+          npm run build
+
       - name: Run API tests
         env:
           PYTHONPATH: src:api/src
         run: python -m unittest discover -s api/tests -p "test_*.py" -v
+
+      - name: Build and inspect API wheel
+        run: |
+          python -m build --wheel --outdir api/dist api
+          python api/scripts/check_verifier_wheel.py api/dist/*.whl

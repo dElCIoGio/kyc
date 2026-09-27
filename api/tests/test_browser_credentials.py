@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+import re
 from urllib.parse import urlsplit
 import unittest
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
-from kyc_api.main import create_app
-from kyc_api.sessions import _now
+from kyc_api.main import _verifier_asset, create_app
 
-from helpers import AUTH_HEADERS, FakeCoordinator, PNG_BYTES, settings
+from helpers import AUTH_HEADERS, FakeCoordinator, FakeLivenessEvaluator, PNG_BYTES, settings
 
 
 class BrowserCredentialTests(unittest.TestCase):
@@ -92,29 +93,86 @@ class BrowserCredentialTests(unittest.TestCase):
         )
         return session_id, urlsplit(response.json()["verification_url"]).fragment
 
-    def test_expired_session_keeps_safe_get_at_stable_410(self) -> None:
-        session_id, token = self._issued()
-        self.client.app.state.sessions._records[session_id].expires_at = _now() - timedelta(seconds=1)
-        response = self.client.get(
-            f"/v1/sessions/{session_id}", headers=self._browser_headers(token)
-        )
-        self.assertEqual(410, response.status_code)
-        self.assertEqual("SESSION_EXPIRED", response.json()["error"]["code"])
-        self.assertEqual(
-            410,
-            self.client.post(
-                f"/v1/sessions/{session_id}/images/front",
-                headers=self._browser_headers(token),
-            ).status_code,
-        )
+    def test_natural_session_expiry_returns_410_while_token_is_valid(self) -> None:
+        started = datetime(2026, 9, 27, tzinfo=UTC)
+        coordinator = FakeCoordinator()
+        liveness = FakeLivenessEvaluator()
+        assessor = Mock()
+        with (
+            patch("kyc_api.sessions._now", return_value=started) as session_clock,
+            patch("kyc_api.browser_credentials._now", return_value=started) as credential_clock,
+            TestClient(
+                create_app(
+                    settings=settings(session_ttl_seconds=60, browser_token_ttl_seconds=120),
+                    coordinator=coordinator,
+                    capture_assessor=assessor,
+                    liveness_evaluator=liveness,
+                )
+            ) as client,
+        ):
+            session_id = client.post("/v1/sessions", headers=AUTH_HEADERS).json()["session_id"]
+            token = urlsplit(
+                client.post(
+                    f"/v1/sessions/{session_id}/browser-token", headers=AUTH_HEADERS
+                ).json()["verification_url"]
+            ).fragment
 
-    def test_verifier_assets_have_no_store_security_headers(self) -> None:
+            expired_at = started + timedelta(seconds=61)
+            session_clock.return_value = expired_at
+            credential_clock.return_value = expired_at
+            headers = self._browser_headers(token)
+
+            response = client.get(f"/v1/sessions/{session_id}", headers=headers)
+            self.assertEqual(410, response.status_code)
+            self.assertEqual("SESSION_EXPIRED", response.json()["error"]["code"])
+            self.assertFalse(client.app.state.sessions.contains_images(session_id))
+
+            self.assertEqual(
+                410,
+                client.post(
+                    f"/v1/sessions/{session_id}/images/front",
+                    headers=headers,
+                    files={"image": ("front.png", PNG_BYTES, "image/png")},
+                ).status_code,
+            )
+            self.assertEqual(
+                410,
+                client.post(
+                    f"/v1/sessions/{session_id}/liveness",
+                    headers=headers,
+                    files=[("frames", ("frame.png", PNG_BYTES, "image/png"))] * 3,
+                ).status_code,
+            )
+            assessor.assess.assert_not_called()
+            self.assertEqual([], coordinator.calls)
+            self.assertEqual(0, liveness.calls)
+            self.assertFalse(client.app.state.sessions.contains_images(session_id))
+
+            credential_clock.return_value = started + timedelta(seconds=121)
+            self.assertEqual(
+                401,
+                client.get(f"/v1/sessions/{session_id}", headers=headers).status_code,
+            )
+
+    def test_verifier_assets_resolve_from_static_assets_root(self) -> None:
         response = self.client.get("/verify/0123456789abcdef")
         self.assertEqual(200, response.status_code)
         self.assertEqual("no-store", response.headers["Cache-Control"])
         self.assertEqual("no-referrer", response.headers["Referrer-Policy"])
         self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
-        self.assertIn("assets/", response.text)
+        script = re.search(r'<script[^>]+src="(?P<path>/verify/assets/[^"]+\.js)"', response.text)
+        self.assertIsNotNone(script)
+        assert script is not None
+        asset = self.client.get(script.group("path"))
+        self.assertEqual(200, asset.status_code)
+        self.assertEqual("no-store", asset.headers["Cache-Control"])
+        self.assertEqual("no-referrer", asset.headers["Referrer-Policy"])
+        self.assertIn("frame-ancestors 'none'", asset.headers["Content-Security-Policy"])
+
+        self.assertEqual(404, self.client.get("/verify/assets/%2e%2e/main.py").status_code)
+        self.assertEqual(404, self.client.get("/verify/assets/%2e%2e%2fmain.py").status_code)
+        with self.assertRaises(ValueError):
+            _verifier_asset("../index.html")
 
 
 if __name__ == "__main__":

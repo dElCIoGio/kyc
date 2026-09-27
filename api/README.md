@@ -64,7 +64,7 @@ KYC_FACE_RECOGNITION_MODEL_ROOT=private-models/recognition
 KYC_FACE_RECOGNITION_MODEL_ID=development-pack
 KYC_SESSION_TTL_SECONDS=1800
 KYC_PUBLIC_BASE_URL=http://127.0.0.1:8000
-KYC_BROWSER_TOKEN_TTL_SECONDS=1800
+KYC_BROWSER_TOKEN_TTL_SECONDS=1860
 KYC_BROWSER_RATE_LIMIT_REQUESTS=60
 KYC_MAX_SESSIONS=100
 KYC_JOB_WORKERS=1
@@ -80,6 +80,15 @@ KYC_OTEL_TRACE_SAMPLE_RATIO=1.0
 KYC_OTEL_METRIC_EXPORT_INTERVAL_SECONDS=60
 KYC_OTEL_EXPORT_TIMEOUT_SECONDS=10
 ```
+
+Browser credentials use their own fixed TTL and never extend a verification
+session. The beta defaults leave a 60-second observation window after the
+default session expiry: a still-valid browser credential can read its bound
+session and receive `410 SESSION_EXPIRED`; document and liveness submissions
+remain blocked before processing. Deployments may configure either TTL
+independently. If the browser credential expires first, browser requests return
+`401` and the customer backend must issue a new link while the session remains
+usable. Reissuing a browser credential rotates only that credential.
 
 Start the service from the repository root:
 

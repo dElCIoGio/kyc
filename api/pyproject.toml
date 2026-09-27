@@ -20,7 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 recognition = ["angolan-kyc-engine[recognition]>=0.1,<0.2"]
-dev = ["httpx>=0.28,<1"]
+dev = ["build>=1,<2", "httpx>=0.28,<1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+kyc_api = ["verify/dist/index.html", "verify/dist/assets/**/*"]

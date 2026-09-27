@@ -37,9 +37,13 @@ class BrowserCredentialStore:
 
     def issue(self, session_id: str) -> tuple[str, datetime]:
         """Rotate and return a credential for a currently live session."""
-        snapshot = self._sessions.get(session_id)
+        self._sessions.get(session_id)
         now = _now()
-        expires_at = min(snapshot.expires_at, now + self._ttl)
+        # Browser credentials have their own fixed lifetime.  They never extend
+        # the session: authorization still asks SessionStore to decide whether
+        # the bound workflow is active.  Keeping this independent permits a
+        # still-valid credential to observe the session's stable 410 tombstone.
+        expires_at = now + self._ttl
         raw = f"bt_{token_urlsafe(32)}"
         digest = _digest(raw)
         with self._lock:

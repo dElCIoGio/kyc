@@ -367,7 +367,7 @@ def create_app(
     @application.get("/verify/{session_id}", include_in_schema=False)
     def hosted_verifier(session_id: str) -> FileResponse:
         # The session id is routing-only. The fragment token is never received here.
-        return FileResponse(_verifier_asset("index.html"), headers=_verifier_headers())
+        return FileResponse(_verifier_index(), headers=_verifier_headers())
 
     @application.get("/verify/assets/{asset_path:path}", include_in_schema=False)
     def hosted_verifier_asset(asset_path: str) -> FileResponse:
@@ -842,12 +842,20 @@ async def _cleanup_sessions(
 
 
 def _verifier_asset(name: str) -> Path:
-    source_root = Path(__file__).parent / "verify"
-    root = (source_root / "dist" if (source_root / "dist").is_dir() else source_root).resolve()
+    root = (_verifier_root() / "assets").resolve()
     asset = (root / name).resolve()
-    if root not in asset.parents and asset != root:
+    if root not in asset.parents:
         raise ValueError("verifier asset path escapes the static root")
     return asset
+
+
+def _verifier_index() -> Path:
+    return _verifier_root() / "index.html"
+
+
+def _verifier_root() -> Path:
+    source_root = Path(__file__).parent / "verify"
+    return (source_root / "dist" if (source_root / "dist").is_dir() else source_root).resolve()
 
 
 def _verifier_headers() -> dict[str, str]:

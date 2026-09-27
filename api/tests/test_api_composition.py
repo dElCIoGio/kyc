@@ -44,14 +44,14 @@ class ApiCompositionTests(unittest.TestCase):
         configured = settings(
             liveness_enabled=True,
             liveness_model_root=Path("private-models/liveness/minifasnet"),
-            liveness_frame_count=4,
+            liveness_frame_count=3,
             liveness_min_real_ratio=0.75,
         )
 
         evaluator = create_liveness_evaluator(configured)
 
         assert evaluator is not None
-        self.assertEqual(4, evaluator.frame_count)
+        self.assertEqual(3, evaluator.frame_count)
         self.assertIs(detector, evaluator._detector)
         self.assertIs(face_detector, evaluator._face_detector)
         detector_class.assert_called_once_with(configured.liveness_model_root)
@@ -64,6 +64,23 @@ class ApiCompositionTests(unittest.TestCase):
         )
         with self.assertRaises(MiniFASNetInitializationError):
             create_liveness_evaluator(configured)
+
+    def test_hosted_liveness_requires_exactly_three_frames(self) -> None:
+        self.assertEqual(3, settings().liveness_frame_count)
+        self.assertEqual(
+            3,
+            settings(
+                liveness_enabled=True,
+                liveness_model_root=Path("private-models/liveness/minifasnet"),
+                liveness_frame_count=3,
+            ).liveness_frame_count,
+        )
+        with self.assertRaisesRegex(ValueError, "KYC_LIVENESS_FRAME_COUNT must equal 3"):
+            settings(
+                liveness_enabled=True,
+                liveness_model_root=Path("private-models/liveness/minifasnet"),
+                liveness_frame_count=4,
+            )
 
     @patch("kyc_api.composition.InsightFaceRecognizer")
     def test_face_recognition_is_optional_and_uses_explicit_local_configuration(

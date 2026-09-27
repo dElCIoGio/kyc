@@ -35,7 +35,7 @@ class ApiSettings(BaseSettings):
     face_recognition_model_id: str | None = None
     face_match_workers: int = Field(default=1, gt=0)
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
-    browser_token_ttl_seconds: int = Field(default=30 * 60, gt=0)
+    browser_token_ttl_seconds: int = Field(default=31 * 60, gt=0)
     browser_rate_limit_requests: int = Field(default=60, gt=0)
     public_base_url: str = "http://127.0.0.1:8000"
     max_sessions: int = Field(default=100, gt=0)
@@ -90,6 +90,10 @@ class ApiSettings(BaseSettings):
     def validate_liveness_configuration(self) -> "ApiSettings":
         if self.liveness_enabled and self.liveness_model_root is None:
             raise ValueError("KYC_LIVENESS_MODEL_ROOT is required when KYC_LIVENESS_ENABLED is true")
+        if self.liveness_enabled and self.liveness_frame_count != 3:
+            raise ValueError(
+                "KYC_LIVENESS_FRAME_COUNT must equal 3 when KYC_LIVENESS_ENABLED is true"
+            )
         return self
 
     @model_validator(mode="after")

@@ -12,6 +12,8 @@ from kyc_engine import LivenessNoFaceError, LivenessResult
 from kyc_engine.intake import ImageIntake
 from kyc_api.jobs import JobManager
 from kyc_api.main import create_app
+from kyc_api.models import VerificationStatus
+from kyc_api.projection import session_response
 from kyc_api.sessions import SessionConflict, SessionExpired, SessionStore, _now
 from kyc_api.verification import VerificationManager
 
@@ -21,6 +23,7 @@ from helpers import (
     FakeCoordinator,
     FakeLivenessEvaluator,
     accept_document,
+    extraction_result,
     settings,
 )
 
@@ -230,6 +233,50 @@ class VerificationManagerLivenessTests(unittest.TestCase):
             self.assertFalse(hasattr(submission.snapshot, "liveness_result"))
             with self.assertRaises(SessionConflict):
                 manager.submit_liveness(session_id, [PNG_BYTES] * 3)
+        finally:
+            executor.shutdown()
+
+    def test_optional_face_comparison_completes_after_liveness_once(self) -> None:
+        events: list[str] = []
+        store, manager, executor = self._manager(FakeLivenessEvaluator(), events)
+        try:
+            session_id = store.create().session_id
+            accept_document(store, session_id)
+            job_id = store.queue_document_processing(session_id).document.job_id
+            assert job_id is not None
+            store.start_document_processing(session_id, job_id)
+            document_complete = store.complete_document_processing(
+                session_id, job_id, extraction_result()
+            )
+            assert document_complete is not None
+
+            after_document = session_response(document_complete)
+            self.assertEqual(VerificationStatus.IN_PROGRESS, document_complete.verification_status)
+            self.assertEqual("in_progress", after_document.status)
+            self.assertEqual("submit_liveness", after_document.next_action)
+            self.assertEqual("not_available", after_document.face_comparison.status)
+
+            submission = manager.submit_liveness(session_id, [PNG_BYTES] * 3)
+            after_liveness = session_response(submission.snapshot)
+            self.assertEqual(VerificationStatus.COMPLETED, submission.snapshot.verification_status)
+            self.assertEqual("completed", after_liveness.status)
+            self.assertIsNone(after_liveness.next_action)
+            self.assertEqual("not_available", after_liveness.face_comparison.status)
+            self.assertEqual(
+                ["liveness.started", "liveness.passed", "verification.completed"],
+                events,
+            )
+            self.assertEqual(1, events.count("verification.completed"))
+            self.assertFalse(any(event.startswith("face_match.") for event in events))
+
+            self.assertIsNone(store.refresh_verification_completion(session_id))
+            self.assertIsNone(store.refresh_verification_completion(session_id))
+            self.assertIsNone(
+                manager.complete_liveness(
+                    session_id, LivenessResult(True, 0.9, frames_evaluated=3, real_frames=3)
+                )
+            )
+            self.assertEqual(1, events.count("verification.completed"))
         finally:
             executor.shutdown()
 

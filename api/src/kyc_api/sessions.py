@@ -602,6 +602,12 @@ class SessionStore:
         with self._lock:
             return self._purge_expired(_now())
 
+    def expiry_tombstone_deadline(self, session_id: str) -> datetime | None:
+        """Return only the non-sensitive expiry tombstone deadline, if retained."""
+        with self._lock:
+            self._purge_expired(_now())
+            return self._expired.get(session_id)
+
     def _get_record(self, session_id: str) -> _SessionRecord:
         self._purge_expired(_now())
         try:

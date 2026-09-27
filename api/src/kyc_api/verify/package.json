@@ -1,0 +1,15 @@
+{
+  "name": "kyc-hosted-verifier",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "check": "tsc --allowJs --checkJs --noEmit --target ES2022 --lib ES2022,DOM --skipLibCheck assets/app.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

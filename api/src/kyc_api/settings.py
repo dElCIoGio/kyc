@@ -35,6 +35,9 @@ class ApiSettings(BaseSettings):
     face_recognition_model_id: str | None = None
     face_match_workers: int = Field(default=1, gt=0)
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
+    browser_token_ttl_seconds: int = Field(default=30 * 60, gt=0)
+    browser_rate_limit_requests: int = Field(default=60, gt=0)
+    public_base_url: str = "http://127.0.0.1:8000"
     max_sessions: int = Field(default=100, gt=0)
     job_workers: int = Field(default=1, gt=0)
     rate_limit_requests: int = Field(default=120, gt=0)
@@ -121,6 +124,17 @@ class ApiSettings(BaseSettings):
             raise ValueError("KYC_WEBHOOK_URL must be an absolute HTTP(S) URL")
         if parsed.scheme == "http" and parsed.hostname != "web":
             raise ValueError("KYC_WEBHOOK_URL must use HTTPS outside the internal web service")
+        return self
+
+    @model_validator(mode="after")
+    def validate_public_base_url(self) -> "ApiSettings":
+        parsed = urlsplit(self.public_base_url)
+        if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+            raise ValueError("KYC_PUBLIC_BASE_URL must not contain credentials, a query, or a fragment")
+        if not parsed.hostname or parsed.scheme not in {"http", "https"}:
+            raise ValueError("KYC_PUBLIC_BASE_URL must be an absolute HTTP(S) URL")
+        if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost"}:
+            raise ValueError("KYC_PUBLIC_BASE_URL must use HTTPS outside localhost")
         return self
 
     @property

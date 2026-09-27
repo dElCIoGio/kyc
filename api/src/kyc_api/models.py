@@ -151,6 +151,15 @@ class LivenessSubmissionResponse(BaseModel):
     session: SessionResponse
 
 
+class BrowserTokenResponse(BaseModel):
+    """Hosted verifier URL; the raw browser credential appears only in its fragment."""
+
+    model_config = ConfigDict(frozen=True)
+
+    verification_url: str
+    expires_at: datetime
+
+
 class JobStatusResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 

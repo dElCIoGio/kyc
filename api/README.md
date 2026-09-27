@@ -63,6 +63,9 @@ KYC_FACE_RECOGNITION_ENABLED=false
 KYC_FACE_RECOGNITION_MODEL_ROOT=private-models/recognition
 KYC_FACE_RECOGNITION_MODEL_ID=development-pack
 KYC_SESSION_TTL_SECONDS=1800
+KYC_PUBLIC_BASE_URL=http://127.0.0.1:8000
+KYC_BROWSER_TOKEN_TTL_SECONDS=1800
+KYC_BROWSER_RATE_LIMIT_REQUESTS=60
 KYC_MAX_SESSIONS=100
 KYC_JOB_WORKERS=1
 KYC_FACE_MATCH_WORKERS=1
@@ -198,6 +201,20 @@ browser credential boundary are documented in [`docs/api-contract.md`](../docs/a
 
 All `/v1/*` calls require the `X-API-Key` header. `/healthz` is public and never
 returns document data.
+
+### Hosted browser verifier
+
+The customer backend creates a session, then creates a browser credential with
+`POST /v1/sessions/{session_id}/browser-token` using `X-API-Key`. The response
+contains a URL shaped as `https://kyc.example/verify/{session_id}#bt_...`.
+Send that URL to the end user; never send `KYC_API_KEY` to a browser. The
+fragment credential is short-lived, opaque, and accepts only document uploads,
+liveness submission, and safe status reads for its one bound session. It cannot
+retrieve results, delete a session, use another session, or access metrics.
+
+The hosted verifier removes the fragment from the address bar immediately and
+uses the credential only as a bearer authorization header. Deploy it at the
+same HTTPS origin as `/v1`; no browser CORS configuration is required.
 
 Create a session:
 

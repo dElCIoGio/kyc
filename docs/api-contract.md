@@ -136,8 +136,27 @@ are safe and do not contain internal exception detail.
 
 ## Browser credential boundary
 
-The customer backend authenticates with `X-API-Key`, creates the session, and
-later obtains a short-lived opaque credential scoped to that one session. A
-browser credential may submit document/liveness material and read safe session
-status, but may not retrieve results, delete sessions, or access another
-session. Token format and issuance are intentionally not implemented here.
+The customer backend authenticates with `X-API-Key`, creates the session, then
+calls `POST /v1/sessions/{session_id}/browser-token`. It returns a short-lived
+opaque credential only inside a hosted URL fragment:
+
+```json
+{"verification_url":"https://kyc.example/verify/vs_123#bt_...","expires_at":"2026-09-27T21:30:00Z"}
+```
+
+The session ID in the route is not a secret. The fragment token is the sole
+authority, is bound to that exact session, and is stored only as a server-side
+digest. The hosted verifier removes the fragment from the address bar before
+calling the API with `Authorization: Bearer`.
+
+A browser credential can only submit front/back document captures, submit
+liveness frames, and retrieve that bound session's safe status. It cannot
+retrieve results, delete sessions, access metrics, create sessions, recover
+processing, issue credentials, or access another session. Reissuing rotates the
+single active credential for a session.
+
+Explicit deletion revokes the credential immediately. On session expiry the
+service clears all sensitive state but retains only the credential digest,
+session ID, credential expiry, and existing non-sensitive expiry tombstone long
+enough for a still-valid browser credential to receive `410 SESSION_EXPIRED`
+from the safe status endpoint. It cannot upload after expiry.

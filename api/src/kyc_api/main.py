@@ -6,9 +6,10 @@ from collections.abc import AsyncIterator
 from concurrent.futures import Executor
 from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
+from urllib.parse import quote
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.formparsers import MultiPartParser
 
 from kyc_engine import (
@@ -22,7 +23,9 @@ from kyc_engine.intake import ImageIntake
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 from . import __version__
-from .auth import require_api_key
+from .auth import require_api_key, require_session_access
+from .browser_credentials import BrowserCredentialStore
+from .browser_rate_limit import BrowserCredentialRateLimiter
 from .composition import (
     create_capture_assessor,
     create_coordinator,
@@ -50,6 +53,7 @@ from .telemetry import (
 from .models import (
     CaptureIssueResponse,
     CaptureResponse,
+    BrowserTokenResponse,
     DocumentSide,
     ErrorResponse,
     HealthResponse,
@@ -92,6 +96,7 @@ def create_app(
     face_match_executor: Executor | None = None,
     metrics: MetricsRegistry | None = None,
     rate_limiter: ApiKeyRateLimiter | None = None,
+    browser_rate_limiter: BrowserCredentialRateLimiter | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
     portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
 ) -> FastAPI:
@@ -196,6 +201,14 @@ def create_app(
                 max_requests=resolved_settings.rate_limit_requests,
                 window_seconds=resolved_settings.rate_limit_window_seconds,
             )
+            resolved_browser_rate_limiter = browser_rate_limiter or BrowserCredentialRateLimiter(
+                max_requests=resolved_settings.browser_rate_limit_requests,
+                window_seconds=resolved_settings.rate_limit_window_seconds,
+            )
+            browser_credentials = BrowserCredentialStore(
+                sessions=resolved_store,
+                ttl_seconds=resolved_settings.browser_token_ttl_seconds,
+            )
             resolved_dispatcher = webhook_dispatcher
             if resolved_dispatcher is None and resolved_settings.webhook_enabled:
                 assert resolved_settings.webhook_url is not None
@@ -287,11 +300,14 @@ def create_app(
         application.state.orchestrator = orchestrator
         application.state.face_match_dispatcher = face_match_dispatcher
         application.state.rate_limiter = resolved_rate_limiter
+        application.state.browser_rate_limiter = resolved_browser_rate_limiter
+        application.state.browser_credentials = browser_credentials
         application.state.webhook_dispatcher = resolved_dispatcher
         cleanup_stop = asyncio.Event()
         cleanup_task = asyncio.create_task(
             _cleanup_sessions(
                 resolved_store,
+                browser_credentials,
                 cleanup_stop,
                 resolved_settings.session_cleanup_interval_seconds,
             )
@@ -347,6 +363,22 @@ def create_app(
     )
     application.add_middleware(RequestContextMiddleware)
     _install_error_handlers(application)
+
+    @application.get("/verify/{session_id}", include_in_schema=False)
+    def hosted_verifier(session_id: str) -> FileResponse:
+        # The session id is routing-only. The fragment token is never received here.
+        return FileResponse(_verifier_asset("index.html"), headers=_verifier_headers())
+
+    @application.get("/verify/assets/{asset_path:path}", include_in_schema=False)
+    def hosted_verifier_asset(asset_path: str) -> FileResponse:
+        try:
+            asset = _verifier_asset(asset_path)
+        except ValueError:
+            raise _problem(404, "NOT_FOUND", "Resource was not found") from None
+        if not asset.is_file():
+            raise _problem(404, "NOT_FOUND", "Resource was not found")
+        media_type = "application/javascript" if asset.suffix == ".ts" else None
+        return FileResponse(asset, headers=_verifier_headers(), media_type=media_type)
     @application.get("/healthz", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(version=__version__)
@@ -382,12 +414,30 @@ def create_app(
         return session_response(created)
 
     @application.post(
+        "/v1/sessions/{session_id}/browser-token",
+        response_model=BrowserTokenResponse,
+        tags=["Verification sessions"],
+        summary="Create a hosted browser verification credential",
+        description="Creates one short-lived opaque credential scoped to this session. The credential appears only in the hosted URL fragment.",
+        dependencies=[Depends(require_api_key)],
+        responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 410: {"model": ErrorResponse}},
+    )
+    def create_browser_token(session_id: str, request: Request) -> BrowserTokenResponse:
+        with _session_logging_context(request, session_id):
+            token, expires_at = request.app.state.browser_credentials.issue(session_id)
+            base = request.app.state.settings.public_base_url.rstrip("/")
+            return BrowserTokenResponse(
+                verification_url=f"{base}/verify/{quote(session_id, safe='')}#{token}",
+                expires_at=expires_at,
+            )
+
+    @application.post(
         "/v1/sessions/{session_id}/images/{side}",
         response_model=CaptureResponse,
         tags=["Verification sessions"],
         summary="Submit a document side",
         description="Submits a labelled front or back image. Quality rejection is a successful response with `accepted: false` and retry-safe issues.",
-        dependencies=[Depends(require_api_key)],
+        dependencies=[Depends(require_session_access)],
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
@@ -445,7 +495,7 @@ def create_app(
         tags=["Verification sessions"],
         summary="Submit liveness frames",
         description="Submits the configured liveness frame set and returns the updated public session without biometric scores or artifacts.",
-        dependencies=[Depends(require_api_key)],
+        dependencies=[Depends(require_session_access)],
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
@@ -532,7 +582,7 @@ def create_app(
         tags=["Verification sessions"],
         summary="Retrieve public session state",
         description="Returns status and the derived `next_action`, without extracted document values or biometric details.",
-        dependencies=[Depends(require_api_key)],
+        dependencies=[Depends(require_session_access)],
         responses={
             401: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
@@ -575,6 +625,7 @@ def create_app(
     )
     def delete_session(session_id: str, request: Request) -> Response:
         with _session_logging_context(request, session_id):
+            request.app.state.browser_credentials.revoke_session(session_id)
             request.app.state.sessions.delete(session_id)
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -778,6 +829,7 @@ def _session_logging_context(request: Request, session_id: str):
 
 async def _cleanup_sessions(
     store: SessionStore,
+    browser_credentials: BrowserCredentialStore,
     stop: asyncio.Event,
     interval_seconds: int,
 ) -> None:
@@ -786,6 +838,31 @@ async def _cleanup_sessions(
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
         except TimeoutError:
             store.cleanup()
+            browser_credentials.cleanup()
+
+
+def _verifier_asset(name: str) -> Path:
+    source_root = Path(__file__).parent / "verify"
+    root = (source_root / "dist" if (source_root / "dist").is_dir() else source_root).resolve()
+    asset = (root / name).resolve()
+    if root not in asset.parents and asset != root:
+        raise ValueError("verifier asset path escapes the static root")
+    return asset
+
+
+def _verifier_headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": (
+            "default-src 'self'; base-uri 'self'; form-action 'self'; "
+            "frame-ancestors 'none'; object-src 'none'; connect-src 'self'; "
+            "img-src 'self' blob: data:; media-src 'self' blob:; "
+            "script-src 'self'; style-src 'self'"
+        ),
+    }
 
 
 def _error_response(

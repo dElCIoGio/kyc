@@ -1,4 +1,12 @@
 # syntax=docker/dockerfile:1.7
+FROM node:22-alpine AS verifier-assets
+
+WORKDIR /verify
+COPY api/src/kyc_api/verify/package.json api/src/kyc_api/verify/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY api/src/kyc_api/verify ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -21,6 +29,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY api/pyproject.toml api/README.md ./api/
 COPY api/src ./api/src
+COPY --from=verifier-assets /verify/dist ./api/src/kyc_api/verify/dist
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip \

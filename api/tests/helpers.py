@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from threading import Event
 
-from PIL import Image, ImageDraw
+import cv2
+import numpy as np
 
 from kyc_engine import (
     CaptureAssessment,
@@ -23,15 +23,17 @@ API_KEY = "test-api-key-123456789"
 AUTH_HEADERS = {"X-API-Key": API_KEY}
 
 def _synthetic_png() -> bytes:
-    image = Image.new("L", (320, 240), 128)
-    draw = ImageDraw.Draw(image)
-    for x in range(0, 320, 16):
-        draw.line((x, 0, x, 239), fill=30 if (x // 16) % 2 else 225, width=3)
-    for y in range(0, 240, 16):
-        draw.line((0, y, 319, y), fill=225 if (y // 16) % 2 else 30, width=2)
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
+    image = np.full((240, 320, 3), (48, 70, 88), dtype=np.uint8)
+    card = np.asarray(((48, 52), (270, 46), (279, 185), (40, 190)), dtype=np.int32)
+    cv2.fillConvexPoly(image, card, (202, 202, 202), cv2.LINE_8)
+    cv2.polylines(image, (card,), True, (246, 246, 246), 3, cv2.LINE_8)
+    for offset in range(3):
+        y = 88 + offset * 24
+        cv2.line(image, (85, y), (220, y - 4), (75, 75, 75), 2, cv2.LINE_8)
+    success, encoded = cv2.imencode(".png", image, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+    if not success:
+        raise AssertionError("could not encode synthetic document capture")
+    return encoded.tobytes()
 
 
 PNG_BYTES = _synthetic_png()
@@ -137,7 +139,18 @@ def accepted_capture_assessment() -> CaptureAssessment:
     return CaptureAssessment(
         accepted=True,
         issues=(),
-        metrics=CaptureMetrics(width=320, height=240, sharpness=100.0, brightness=128.0, contrast=50.0),
+        metrics=CaptureMetrics(
+            width=320,
+            height=240,
+            sharpness=100.0,
+            brightness=128.0,
+            contrast=50.0,
+            document_detected=True,
+            document_area_ratio=0.4,
+            minimum_margin_ratio=0.1,
+            perspective_score=0.0,
+            glare_ratio=0.0,
+        ),
     )
 
 

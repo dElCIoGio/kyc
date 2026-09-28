@@ -40,15 +40,20 @@ and `build_balanced_pipeline()` remain advanced composition APIs.
 capture becomes part of a verification session. It uses `ImageIntake` as its only
 decode and validation path, then reports immutable `CaptureAssessment` values:
 
-- `CaptureMetrics`: safe numeric width, height, sharpness, brightness, and contrast.
+- `CaptureMetrics`: internal-only width, height, sharpness, brightness, contrast,
+  document-detection, and non-sensitive quality measurements. They are not part of
+  the public API response.
 - `CaptureIssue`: an ordered, PII-safe quality code and message.
 - `CaptureAssessment`: accepted flag, issues, and metrics. It never contains source
   bytes or decoded pixels.
 
-The initial gate reports `too_blurry`, `too_dark`, `overexposed`, and
-`low_contrast`; it is intentionally not a document detector, OCR, authenticity,
-or face-quality check. Its thresholds are initial uncalibrated defaults, not
-production-calibrated quality policy.
+The initial gate reports `document_not_detected`, `document_cropped`,
+`document_too_small`, `excessive_perspective`, `too_blurry`, `too_dark`,
+`overexposed`, `low_contrast`, and `glare_detected`. Its generic OpenCV
+quadrilateral and glare checks happen before capture retention or OCR; rejected
+captures can be retried. It is intentionally not document classification, OCR,
+authenticity, or face-quality validation. All thresholds are initial uncalibrated
+beta defaults, not production-calibrated quality policy.
 
 ## Liveness Contracts
 

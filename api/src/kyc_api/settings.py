@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import isfinite
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -25,6 +26,10 @@ class ApiSettings(BaseSettings):
     capture_min_brightness: float = Field(default=35.0, ge=0, le=255)
     capture_max_brightness: float = Field(default=220.0, ge=0, le=255)
     capture_min_contrast: float = Field(default=12.0, ge=0)
+    capture_min_document_area_ratio: float = Field(default=0.12, gt=0, lt=1)
+    capture_min_edge_margin_ratio: float = Field(default=0.015, ge=0, lt=0.5)
+    capture_max_perspective_distortion: float = Field(default=0.30, gt=0, le=1)
+    capture_max_glare_ratio: float = Field(default=0.035, gt=0, lt=1)
     liveness_enabled: bool = False
     liveness_model_root: Path | None = None
     liveness_frame_count: int = Field(default=3, gt=0)
@@ -84,6 +89,18 @@ class ApiSettings(BaseSettings):
     def validate_capture_assessment_configuration(self) -> "ApiSettings":
         if self.capture_min_brightness >= self.capture_max_brightness:
             raise ValueError("KYC_CAPTURE_MIN_BRIGHTNESS must be lower than KYC_CAPTURE_MAX_BRIGHTNESS")
+        capture_values = (
+            self.capture_min_sharpness,
+            self.capture_min_brightness,
+            self.capture_max_brightness,
+            self.capture_min_contrast,
+            self.capture_min_document_area_ratio,
+            self.capture_min_edge_margin_ratio,
+            self.capture_max_perspective_distortion,
+            self.capture_max_glare_ratio,
+        )
+        if any(not isfinite(value) for value in capture_values):
+            raise ValueError("Capture assessment thresholds must be finite")
         return self
 
     @model_validator(mode="after")

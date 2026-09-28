@@ -31,10 +31,15 @@ class ProcessingStatus(str, Enum):
 
 
 class CaptureIssueCode(str, Enum):
+    DOCUMENT_NOT_DETECTED = "document_not_detected"
+    DOCUMENT_CROPPED = "document_cropped"
+    DOCUMENT_TOO_SMALL = "document_too_small"
+    EXCESSIVE_PERSPECTIVE = "excessive_perspective"
     TOO_BLURRY = "too_blurry"
     TOO_DARK = "too_dark"
     OVEREXPOSED = "overexposed"
     LOW_CONTRAST = "low_contrast"
+    GLARE_DETECTED = "glare_detected"
 
 
 class IssueSeverity(str, Enum):
@@ -145,6 +150,11 @@ class CaptureMetrics:
     sharpness: float
     brightness: float
     contrast: float
+    document_detected: bool = False
+    document_area_ratio: float | None = None
+    minimum_margin_ratio: float | None = None
+    perspective_score: float | None = None
+    glare_ratio: float | None = None
 
 
 @dataclass(frozen=True)

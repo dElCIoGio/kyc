@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Event
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -90,10 +91,47 @@ class ApiSessionTests(unittest.TestCase):
         self.assertFalse(rejected.json()["accepted"])
         self.assertIn("low_contrast", {item["code"] for item in rejected.json()["issues"]})
         self.assertEqual("missing", rejected.json()["session"]["document"]["front_capture"])
+        self.assertNotIn("metrics", rejected.json())
+        self.assertNotIn("document_area_ratio", rejected.text)
+        self.assertNotIn("perspective_score", rejected.text)
+        self.assertNotIn("glare_ratio", rejected.text)
+        self.assertFalse(self.client_context.app.state.sessions.contains_images(session_id))
+        self.assertEqual([], self.coordinator.calls)
 
         accepted = self.upload(session_id, "front")
         self.assertTrue(accepted.json()["accepted"])
         self.assertEqual("accepted", accepted.json()["session"]["document"]["front_capture"])
+
+    def test_capture_threshold_settings_reject_nonfinite_and_incoherent_values(self) -> None:
+        with self.assertRaises(ValueError):
+            settings(capture_max_glare_ratio=float("nan"))
+        with self.assertRaises(ValueError):
+            settings(capture_min_document_area_ratio=1.0)
+        with self.assertRaises(ValueError):
+            settings(capture_min_brightness=220, capture_max_brightness=220)
+
+    def test_rejected_capture_does_not_publish_a_transition_or_submit_a_job(self) -> None:
+        store = SessionStore(ttl_seconds=60, max_sessions=2)
+        session_id = store.create().session_id
+        jobs = Mock()
+        transitions: list[str] = []
+        verification = VerificationManager(
+            assessor=DocumentCaptureAssessor(ImageIntake()),
+            store=store,
+            jobs=jobs,
+            snapshot_publisher=lambda _snapshot, reason: transitions.append(reason),
+        )
+
+        submission = verification.submit_document_capture(
+            session_id,
+            DocumentSide.FRONT,
+            _flat_png(),
+        )
+
+        self.assertFalse(submission.assessment.accepted)
+        self.assertFalse(store.contains_images(session_id))
+        self.assertEqual([], transitions)
+        jobs.submit_document_processing.assert_not_called()
 
     def test_one_accepted_side_does_not_start_processing(self) -> None:
         session_id = self.create_session()

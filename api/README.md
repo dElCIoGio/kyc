@@ -54,6 +54,10 @@ KYC_CAPTURE_MIN_SHARPNESS=25.0
 KYC_CAPTURE_MIN_BRIGHTNESS=35.0
 KYC_CAPTURE_MAX_BRIGHTNESS=220.0
 KYC_CAPTURE_MIN_CONTRAST=12.0
+KYC_CAPTURE_MIN_DOCUMENT_AREA_RATIO=0.12
+KYC_CAPTURE_MIN_EDGE_MARGIN_RATIO=0.015
+KYC_CAPTURE_MAX_PERSPECTIVE_DISTORTION=0.30
+KYC_CAPTURE_MAX_GLARE_RATIO=0.035
 KYC_LIVENESS_ENABLED=false
 KYC_LIVENESS_MODEL_ROOT=private-models/liveness/minifasnet
 KYC_LIVENESS_FRAME_COUNT=3
@@ -237,9 +241,10 @@ capture awaiting both sides; the public `next_action` tells the caller what it
 can do next. Upload the front and back images using the returned ID. Every upload is assessed before it is retained;
 an ordinary quality rejection returns `200` with `accepted: false` and safe
 issue codes, so the caller can retry without changing stored captures. The
-capture sharpness, exposure, and contrast thresholds are initial uncalibrated
-defaults and must be calibrated against representative captures before
-production tuning.
+capture sharpness, exposure, contrast, geometry, and glare thresholds are initial
+uncalibrated beta defaults and must be calibrated against representative captures
+before production tuning. Assessment runs before capture retention and OCR, and a
+rejected side can be submitted again without advancing session state.
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/images/front `

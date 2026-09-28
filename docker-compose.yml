@@ -1,4 +1,31 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: kyc
+      POSTGRES_USER: kyc
+      POSTGRES_PASSWORD: ${KYC_DATABASE_PASSWORD:-kyc-development-only}
+    volumes:
+      - kyc-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kyc -d kyc"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      KYC_DATABASE_URL: postgresql+psycopg://kyc:${KYC_DATABASE_PASSWORD:-kyc-development-only}@postgres:5432/kyc
+    command: ["kyc-api-migrate", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: .
@@ -6,6 +33,8 @@ services:
     env_file:
       - .env
     environment:
+      KYC_SESSION_BACKEND: postgres
+      KYC_DATABASE_URL: postgresql+psycopg://kyc:${KYC_DATABASE_PASSWORD:-kyc-development-only}@postgres:5432/kyc
       # The host model directory is mounted at /models in the container.
       KYC_OCR_MODEL_MANIFEST: /models/paddleocr/ao-id-front-v5-mobile/manifest.json
     expose:
@@ -15,6 +44,9 @@ services:
     volumes:
       - ./private-models:/models:ro
     restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
@@ -42,3 +74,6 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  kyc-postgres-data:

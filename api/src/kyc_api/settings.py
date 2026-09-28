@@ -17,6 +17,8 @@ class ApiSettings(BaseSettings):
     )
 
     api_key: SecretStr = Field(min_length=16)
+    session_backend: Literal["memory", "postgres"] = "memory"
+    database_url: SecretStr | None = None
     ocr_model_manifest: Path
     ocr_device: Literal["cpu", "gpu"] = "cpu"
     log_level: str = "INFO"
@@ -63,6 +65,24 @@ class ApiSettings(BaseSettings):
     webhook_outbox_path: Path = Path("webhook-outbox.sqlite3")
     webhook_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     webhook_retention_seconds: int = Field(default=24 * 60 * 60, gt=0)
+
+    @model_validator(mode="after")
+    def validate_persistence_configuration(self) -> "ApiSettings":
+        if self.session_backend == "postgres" and self.database_url is None:
+            raise ValueError(
+                "KYC_DATABASE_URL is required when KYC_SESSION_BACKEND is postgres"
+            )
+        if (
+            self.session_backend == "postgres"
+            and self.database_url is not None
+            and not self.database_url.get_secret_value().startswith(
+                "postgresql+psycopg://"
+            )
+        ):
+            raise ValueError(
+                "KYC_DATABASE_URL must use the postgresql+psycopg SQLAlchemy driver"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_otlp_export_configuration(self) -> "ApiSettings":

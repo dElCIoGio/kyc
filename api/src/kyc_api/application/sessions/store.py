@@ -93,6 +93,10 @@ class _DocumentState:
     status: DocumentStatus = DocumentStatus.AWAITING_CAPTURE
     front: bytes | None = None
     back: bytes | None = None
+    # Capture acceptance is durable lifecycle state; the assessment itself is
+    # process-local and is unavailable to a store that does not own it.
+    front_capture_accepted: bool = False
+    back_capture_accepted: bool = False
     front_capture: CaptureAssessment | None = None
     back_capture: CaptureAssessment | None = None
     job_id: str | None = None
@@ -231,53 +235,17 @@ class SessionStore:
         content: bytes,
         assessment: CaptureAssessment,
     ) -> DocumentCaptureTransition:
-        if not assessment.accepted:
-            raise ValueError("Only accepted captures can be stored")
+        _require_accepted_capture(assessment)
         with self._lock:
             record = self._get_record(session_id)
-            document = record.document
-            if record.status != VerificationStatus.IN_PROGRESS:
-                raise SessionConflict("Captures cannot be changed after verification ends")
-            if document.status != DocumentStatus.AWAITING_CAPTURE:
-                raise SessionConflict("Captures cannot be changed after capture completion")
-            if side == DocumentSide.FRONT:
-                document.front = bytes(content)
-                document.front_capture = assessment
-            else:
-                document.back = bytes(content)
-                document.back_capture = assessment
-            document.error_code = None
-            self._refresh_expiry(record)
-            record.event_sequence += 1
-            accepted = _snapshot(record)
-
-            completed: SessionSnapshot | None = None
-            if document.front is not None and document.back is not None:
-                document.status = DocumentStatus.READY
-                record.liveness.status = LivenessStatus.READY
-                record.event_sequence += 1
-                completed = _snapshot(record)
-            return DocumentCaptureTransition(
-                snapshot=completed or accepted,
-                capture_accepted=accepted,
-                capture_completed=completed,
+            return _accept_document_capture(
+                record, side, content, assessment, self.portrait_artifacts, self._ttl
             )
 
     def queue_document_processing(self, session_id: str) -> SessionSnapshot:
         with self._lock:
             record = self._get_record(session_id)
-            document = record.document
-            if record.status != VerificationStatus.IN_PROGRESS:
-                raise SessionConflict("Verification is no longer active")
-            if document.status != DocumentStatus.READY:
-                raise SessionConflict("Document processing is not ready to queue")
-            if document.front is None or document.back is None:
-                raise SessionConflict("Both document sides must be accepted")
-            document.job_id = uuid4().hex
-            document.status = DocumentStatus.QUEUED
-            document.error_code = None
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _queue_document_processing(record, self._ttl)
             return _snapshot(record)
 
     def start_document_processing(
@@ -285,19 +253,8 @@ class SessionStore:
     ) -> tuple[bytes, bytes, SessionSnapshot]:
         with self._lock:
             record = self._get_record(session_id)
-            document = record.document
-            if (
-                record.status != VerificationStatus.IN_PROGRESS
-                or document.status != DocumentStatus.QUEUED
-                or document.job_id != job_id
-                or document.front is None
-                or document.back is None
-            ):
-                raise SessionConflict("The queued document job is no longer available")
-            document.status = DocumentStatus.PROCESSING
-            record.event_sequence += 1
-            self._refresh_expiry(record)
-            return document.front, document.back, _snapshot(record)
+            front, back = _begin_document_processing(record, job_id, self._ttl)
+            return front, back, _snapshot(record)
 
     def complete_document_processing(
         self,
@@ -307,48 +264,12 @@ class SessionStore:
     ) -> SessionSnapshot | None:
         with self._lock:
             record = self._records.get(session_id)
-            if not self._can_finish_document_job(record, job_id):
+            if not _can_finish_document_job(record, job_id):
                 return None
             assert record is not None
-            document = record.document
-            artifact_ids = _portrait_artifact_ids(result)
-            if artifact_ids and result.status == ProcessingStatus.FAILED:
-                if self.portrait_artifacts is not None:
-                    self.portrait_artifacts.release_pending(artifact_ids)
-                artifact_ids = ()
-            if artifact_ids and (
-                self.portrait_artifacts is None
-                or not self.portrait_artifacts.claim(artifact_ids, session_id)
-            ):
-                if self.portrait_artifacts is not None:
-                    self.portrait_artifacts.release_pending(artifact_ids)
-                _clear_document_sources(document)
-                document.result = None
-                document.error_code = "PORTRAIT_ARTIFACT_CLAIM_FAILED"
-                document.status = DocumentStatus.FAILED
-                self._refresh_verification_failure(record)
-                record.event_sequence += 1
-                self._refresh_expiry(record)
-                return _snapshot(record)
-            _clear_document_sources(document)
-            document.result = result
-            document.error_code = None
-            document.status = {
-                ProcessingStatus.SUCCESS: DocumentStatus.PASSED,
-                ProcessingStatus.PARTIAL: DocumentStatus.PARTIAL,
-                ProcessingStatus.FAILED: DocumentStatus.FAILED,
-            }[result.status]
-            # Defer aggregate completion until the post-extraction NIF
-            # orchestrator has either claimed applicable work or explicitly
-            # settled a safe skipped state.
-            if record.nif_verification_enabled and result.status == ProcessingStatus.SUCCESS:
-                record.nif_verification.settled = False
-                record.nif_verification.not_run_reason = ""
-            self._refresh_face_match_readiness(record)
-            self._refresh_verification_completion(record)
-            self._refresh_verification_failure(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _complete_document_processing(
+                record, result, self.portrait_artifacts, self._ttl
+            )
             return _snapshot(record)
 
     def fail_document_processing(
@@ -363,14 +284,7 @@ class SessionStore:
                 or record.document.status not in self._DOCUMENT_PROCESSING
             ):
                 return None
-            document = record.document
-            _clear_document_sources(document)
-            document.result = None
-            document.error_code = code
-            document.status = DocumentStatus.FAILED
-            self._refresh_verification_failure(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _fail_document_processing(record, code, self._ttl)
             return _snapshot(record)
 
     def timeout_document_processing(
@@ -379,30 +293,16 @@ class SessionStore:
         """Fail an overdue running job and invalidate any later completion."""
         with self._lock:
             record = self._records.get(session_id)
-            if not self._can_finish_document_job(record, job_id):
+            if not _can_finish_document_job(record, job_id):
                 return None
             assert record is not None
-            document = record.document
-            _clear_document_sources(document)
-            document.result = None
-            document.error_code = "JOB_TIMEOUT"
-            document.status = DocumentStatus.FAILED
-            self._refresh_verification_failure(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _fail_document_processing(record, "JOB_TIMEOUT", self._ttl)
             return _snapshot(record)
 
     def start_liveness(self, session_id: str) -> SessionSnapshot:
         with self._lock:
             record = self._get_record(session_id)
-            if record.status != VerificationStatus.IN_PROGRESS:
-                raise SessionConflict("Verification is no longer active")
-            if record.liveness.status != LivenessStatus.READY:
-                raise SessionConflict("Liveness is not ready to start")
-            record.liveness.status = LivenessStatus.PROCESSING
-            record.liveness.error_code = None
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _start_liveness(record, self._ttl)
             return _snapshot(record)
 
     def complete_liveness(
@@ -419,32 +319,16 @@ class SessionStore:
                 or record.status != VerificationStatus.IN_PROGRESS
                 or record.liveness.status != LivenessStatus.PROCESSING
             ):
-                self._release_pending_live_face(live_face_artifact_id)
+                _release_pending_live_face(live_face_artifact_id, self.portrait_artifacts)
                 return None
-            claimed_artifact_id = None
-            if live_face_artifact_id is not None and result.passed and live_face_eligible:
-                if self.portrait_artifacts is not None and self.portrait_artifacts.claim(
-                    (live_face_artifact_id,), session_id
-                ):
-                    claimed_artifact_id = live_face_artifact_id
-                else:
-                    self._release_pending_live_face(live_face_artifact_id)
-            elif live_face_artifact_id is not None:
-                self._release_pending_live_face(live_face_artifact_id)
-            record.liveness.result = result
-            record.liveness.live_face_artifact_id = claimed_artifact_id
-            record.liveness.live_face_eligible = claimed_artifact_id is not None
-            record.liveness.status = (
-                LivenessStatus.PASSED if result.passed else LivenessStatus.FAILED
+            _complete_liveness(
+                record,
+                result,
+                live_face_artifact_id,
+                live_face_eligible,
+                self.portrait_artifacts,
+                self._ttl,
             )
-            record.liveness.error_code = (
-                None if result.passed else "PASSIVE_LIVENESS_FAILED"
-            )
-            self._refresh_face_match_readiness(record)
-            self._refresh_verification_completion(record)
-            self._refresh_verification_failure(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
             return _snapshot(record)
 
     def claim_nif_verification(
@@ -460,29 +344,13 @@ class SessionStore:
             if record is None or record.status != VerificationStatus.IN_PROGRESS:
                 return None
             nif_state = record.nif_verification
-            if nif_state.attempted or nif_state.status == NifVerificationStatus.PROCESSING:
+            if (
+                nif_state.attempted
+                or nif_state.status == NifVerificationStatus.PROCESSING
+            ):
                 return None
-            candidate = _nif_candidate(record.document.result)
-            if not record.nif_verification_enabled:
-                return self._settle_nif_not_run(record, "disabled")
-            if candidate is None:
-                reason = (
-                    "identifier_unavailable"
-                    if _nif_profile_present(record.document.result)
-                    else "not_applicable"
-                )
-                return self._settle_nif_not_run(record, reason)
-
-            nif, claimed_name = candidate
-            nif_state.status = NifVerificationStatus.PROCESSING
-            nif_state.source = "minfin"
-            nif_state.name_match = None
-            nif_state.not_run_reason = ""
-            nif_state.error_code = None
-            nif_state.settled = False
-            nif_state.attempted = True
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            nif, claimed_name = _claim_nif_verification(record, self._ttl)
+            # A tuple with an empty NIF tells orchestration that this was skipped.
             return nif, claimed_name, _snapshot(record)
 
     def fail_nif_dispatch_capacity(self, session_id: str) -> SessionSnapshot | None:
@@ -495,15 +363,7 @@ class SessionStore:
                 or record.nif_verification.status != NifVerificationStatus.PROCESSING
             ):
                 return None
-            state = record.nif_verification
-            state.status = NifVerificationStatus.FAILED
-            state.source = None
-            state.name_match = None
-            state.error_code = "NIF_VERIFIER_CAPACITY_EXCEEDED"
-            state.settled = True
-            self._refresh_verification_completion(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _fail_nif_dispatch_capacity(record, self._ttl)
             return _snapshot(record)
 
     def complete_nif_verification(
@@ -515,13 +375,7 @@ class SessionStore:
         name_match: bool | None,
         error_code: str | None = None,
     ) -> SessionSnapshot | None:
-        if status not in {
-            NifVerificationStatus.VERIFIED,
-            NifVerificationStatus.NOT_FOUND,
-            NifVerificationStatus.UNAVAILABLE,
-            NifVerificationStatus.FAILED,
-        }:
-            raise ValueError("NIF completion status is not terminal")
+        _require_terminal_nif_status(status)
         with self._lock:
             record = self._records.get(session_id)
             if (
@@ -530,55 +384,22 @@ class SessionStore:
                 or record.nif_verification.status != NifVerificationStatus.PROCESSING
             ):
                 return None
-            state = record.nif_verification
-            state.status = status
-            state.source = source
-            state.name_match = name_match if status == NifVerificationStatus.VERIFIED else None
-            state.error_code = error_code
-            state.settled = True
-            if status == NifVerificationStatus.NOT_FOUND:
-                record.status = VerificationStatus.FAILED
-            else:
-                self._refresh_verification_completion(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _complete_nif_verification(
+                record, status, source, name_match, error_code, self._ttl
+            )
             return _snapshot(record)
-
-    def _settle_nif_not_run(
-        self, record: _SessionRecord, reason: str
-    ) -> tuple[str, str | None, SessionSnapshot] | None:
-        state = record.nif_verification
-        state.status = NifVerificationStatus.NOT_RUN
-        state.source = None
-        state.name_match = None
-        state.not_run_reason = reason
-        state.error_code = None
-        state.settled = True
-        self._refresh_verification_completion(record)
-        record.event_sequence += 1
-        self._refresh_expiry(record)
-        # A tuple with an empty NIF tells orchestration that this was skipped.
-        return "", None, _snapshot(record)
 
     def start_face_match(self, session_id: str) -> SessionSnapshot:
         """Atomically claim a ready face match before model inference begins."""
         with self._lock:
             record = self._get_record(session_id)
-            if record.status != VerificationStatus.IN_PROGRESS:
-                raise SessionConflict("Verification is no longer active")
-            if record.face_match.status != FaceMatchStatus.READY:
-                raise SessionConflict("Face matching is not ready to start")
-            record.face_match.status = FaceMatchStatus.PROCESSING
-            record.face_match.error_code = None
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _start_face_match(record, self._ttl)
             return _snapshot(record)
 
     def complete_face_match(
         self, session_id: str, similarity: float
     ) -> SessionSnapshot | None:
-        if not isfinite(similarity):
-            raise ValueError("Face-match similarity must be finite")
+        _require_finite_similarity(similarity)
         with self._lock:
             record = self._records.get(session_id)
             if (
@@ -587,17 +408,11 @@ class SessionStore:
                 or record.face_match.status != FaceMatchStatus.PROCESSING
             ):
                 return None
-            record.face_match.status = FaceMatchStatus.COMPLETED
-            record.face_match.similarity = float(similarity)
-            record.face_match.error_code = None
-            self._refresh_verification_completion(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _complete_face_match(record, similarity, self._ttl)
             return _snapshot(record)
 
     def fail_face_match(self, session_id: str, code: str) -> SessionSnapshot | None:
-        if code not in _FACE_MATCH_FAILURE_CODES:
-            raise ValueError("Face-match failure code is not trusted")
+        _require_trusted_face_failure_code(code)
         with self._lock:
             record = self._records.get(session_id)
             if (
@@ -606,12 +421,7 @@ class SessionStore:
                 or record.face_match.status != FaceMatchStatus.PROCESSING
             ):
                 return None
-            record.face_match.status = FaceMatchStatus.FAILED
-            record.face_match.similarity = None
-            record.face_match.error_code = code
-            self._refresh_verification_failure(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _fail_face_match(record, code, self._ttl)
             return _snapshot(record)
 
     def refresh_verification_completion(self, session_id: str) -> SessionSnapshot | None:
@@ -620,10 +430,10 @@ class SessionStore:
             record = self._records.get(session_id)
             if record is None:
                 return None
-            if not self._refresh_verification_completion(record):
+            if not _refresh_verification_completion(record):
                 return None
             record.event_sequence += 1
-            self._refresh_expiry(record)
+            _refresh_expiry(record, self._ttl)
             return _snapshot(record)
 
     def face_match_result(self, session_id: str) -> FaceMatchResultSnapshot:
@@ -647,15 +457,7 @@ class SessionStore:
                 FaceMatchStatus.FAILED,
             }:
                 raise SessionConflict("Face-match artifacts cannot be released while active")
-            portrait_id = _face_match_portrait_artifact_id(record.document.result)
-            live_id = record.liveness.live_face_artifact_id
-            artifact_ids = tuple(artifact_id for artifact_id in (portrait_id, live_id) if artifact_id is not None)
-            if artifact_ids and self.portrait_artifacts is not None:
-                self.portrait_artifacts.release_owned(artifact_ids, record.session_id)
-            if portrait_id is not None:
-                record.document.result = _clear_portrait_artifact_id(record.document.result)
-            record.liveness.live_face_artifact_id = None
-            record.liveness.live_face_eligible = False
+            _release_face_match_biometric_artifacts(record, self.portrait_artifacts)
 
     def fail_liveness(self, session_id: str, code: str) -> SessionSnapshot | None:
         with self._lock:
@@ -666,13 +468,7 @@ class SessionStore:
                 or record.liveness.status != LivenessStatus.PROCESSING
             ):
                 return None
-            self._release_owned_live_face(record)
-            record.liveness.result = None
-            record.liveness.error_code = code
-            record.liveness.status = LivenessStatus.FAILED
-            self._refresh_verification_failure(record)
-            record.event_sequence += 1
-            self._refresh_expiry(record)
+            _fail_liveness(record, code, self.portrait_artifacts, self._ttl)
             return _snapshot(record)
 
     def result(self, session_id: str) -> DocumentExtractionResult:
@@ -689,7 +485,7 @@ class SessionStore:
         with self._lock:
             record = self._records.pop(session_id, None)
             if record is not None:
-                self._clear_sensitive_state(record)
+                _clear_sensitive_state(record, self.portrait_artifacts)
             self._expired.pop(session_id, None)
 
     def resolve_portrait_artifact(self, session_id: str):
@@ -761,71 +557,6 @@ class SessionStore:
                 raise SessionExpired("Session has expired") from exc
             raise SessionNotFound("Session was not found") from exc
 
-    def _can_finish_document_job(self, record: _SessionRecord | None, job_id: str) -> bool:
-        return bool(
-            record is not None
-            and record.status == VerificationStatus.IN_PROGRESS
-            and record.document.job_id == job_id
-            and record.document.status == DocumentStatus.PROCESSING
-        )
-
-    def _refresh_face_match_readiness(self, record: _SessionRecord) -> bool:
-        """Advance only BLOCKED sessions once every configured input is usable."""
-        if (
-            not record.face_match_required
-            or record.face_match.status != FaceMatchStatus.BLOCKED
-            or record.status != VerificationStatus.IN_PROGRESS
-            or record.document.status != DocumentStatus.PASSED
-            or record.liveness.status != LivenessStatus.PASSED
-            or _face_match_portrait_artifact_id(record.document.result) is None
-            or not record.liveness.live_face_eligible
-            or record.liveness.live_face_artifact_id is None
-        ):
-            return False
-        record.face_match.status = FaceMatchStatus.READY
-        return True
-
-    def _refresh_verification_completion(self, record: _SessionRecord) -> bool:
-        if record.status != VerificationStatus.IN_PROGRESS:
-            return False
-        if record.document.status != DocumentStatus.PASSED:
-            return False
-        if self._nif_blocks_completion(record):
-            return False
-        if record.liveness_required and record.liveness.status != LivenessStatus.PASSED:
-            return False
-        if (
-            record.face_match_required
-            and record.face_match.status != FaceMatchStatus.COMPLETED
-        ):
-            return False
-        record.status = VerificationStatus.COMPLETED
-        return True
-
-    @staticmethod
-    def _nif_blocks_completion(record: _SessionRecord) -> bool:
-        if not record.nif_verification_enabled:
-            return False
-        # The post-extraction resolver must record whether the check is
-        # disabled, inapplicable, identifier-unavailable, or claimed. This
-        # brief pending state prevents a successful document from completing
-        # before that decision is made.
-        return not record.nif_verification.settled
-
-    def _refresh_verification_failure(self, record: _SessionRecord) -> bool:
-        if record.status != VerificationStatus.IN_PROGRESS:
-            return False
-        if record.document.status in {DocumentStatus.PARTIAL, DocumentStatus.FAILED}:
-            record.status = VerificationStatus.FAILED
-            return True
-        if record.liveness_required and record.liveness.status == LivenessStatus.FAILED:
-            record.status = VerificationStatus.FAILED
-            return True
-        if record.face_match_required and record.face_match.status == FaceMatchStatus.FAILED:
-            record.status = VerificationStatus.FAILED
-            return True
-        return False
-
     def _purge_expired(self, now: datetime) -> int:
         self._expired = {
             session_id: retained_until
@@ -840,34 +571,9 @@ class SessionStore:
         for session_id in expired:
             record = self._records.pop(session_id)
             record.status = VerificationStatus.EXPIRED
-            self._clear_sensitive_state(record)
+            _clear_sensitive_state(record, self.portrait_artifacts)
             self._expired[session_id] = now + self._ttl
         return len(expired)
-
-    def _refresh_expiry(self, record: _SessionRecord) -> None:
-        record.expires_at = _now() + self._ttl
-
-    def _clear_sensitive_state(self, record: _SessionRecord) -> None:
-        if self.portrait_artifacts is not None:
-            self.portrait_artifacts.release_owned(
-                _portrait_artifact_ids(record.document.result), record.session_id
-            )
-            self._release_owned_live_face(record)
-        _clear_sensitive_state(record)
-
-    def _release_pending_live_face(self, artifact_id: str | None) -> None:
-        if artifact_id is not None and self.portrait_artifacts is not None:
-            self.portrait_artifacts.release_pending((artifact_id,))
-
-    def _release_owned_live_face(self, record: _SessionRecord) -> None:
-        if record.liveness.live_face_artifact_id is not None and self.portrait_artifacts is not None:
-            self.portrait_artifacts.release_owned(
-                (record.liveness.live_face_artifact_id,), record.session_id
-            )
-        record.liveness.live_face_artifact_id = None
-        record.liveness.live_face_eligible = False
-        record.face_match.similarity = None
-        record.face_match.error_code = None
 
 
 _FACE_MATCH_FAILURE_CODES = frozenset(
@@ -921,12 +627,12 @@ def _snapshot(record: _SessionRecord) -> SessionSnapshot:
             status=document.status,
             front_capture=(
                 CaptureStatus.ACCEPTED
-                if document.front_capture is not None
+                if document.front_capture_accepted
                 else CaptureStatus.MISSING
             ),
             back_capture=(
                 CaptureStatus.ACCEPTED
-                if document.back_capture is not None
+                if document.back_capture_accepted
                 else CaptureStatus.MISSING
             ),
             job_id=document.job_id,
@@ -949,15 +655,28 @@ def _clear_document_sources(document: _DocumentState) -> None:
     document.back = None
 
 
-def _clear_sensitive_state(record: _SessionRecord) -> None:
+def _clear_sensitive_fields(record: _SessionRecord) -> None:
     _clear_document_sources(record.document)
     record.document.front_capture = None
     record.document.back_capture = None
+    record.document.front_capture_accepted = False
+    record.document.back_capture_accepted = False
     record.document.result = None
     record.liveness.result = None
     record.liveness.error_code = None
     record.liveness.live_face_artifact_id = None
     record.liveness.live_face_eligible = False
+
+
+def _clear_sensitive_state(
+    record: _SessionRecord, portrait_artifacts: InMemoryPortraitArtifactStore | None
+) -> None:
+    if portrait_artifacts is not None:
+        portrait_artifacts.release_owned(
+            _portrait_artifact_ids(record.document.result), record.session_id
+        )
+        _release_owned_live_face(record, portrait_artifacts)
+    _clear_sensitive_fields(record)
 
 
 def _nif_profile_present(result: DocumentExtractionResult | None) -> bool:
@@ -995,6 +714,441 @@ def _portrait_artifact_ids(result: DocumentExtractionResult | None) -> tuple[str
         and side_result.portrait is not None
         and side_result.portrait.artifact_id is not None
     )
+
+
+def _refresh_expiry(record: _SessionRecord, ttl: timedelta) -> None:
+    record.expires_at = _now() + ttl
+
+
+def _require_accepted_capture(assessment: CaptureAssessment) -> None:
+    if not assessment.accepted:
+        raise ValueError("Only accepted captures can be stored")
+
+
+def _require_finite_similarity(similarity: float) -> None:
+    if not isfinite(similarity):
+        raise ValueError("Face-match similarity must be finite")
+
+
+def _require_terminal_nif_status(status: NifVerificationStatus) -> None:
+    if status not in {
+        NifVerificationStatus.VERIFIED,
+        NifVerificationStatus.NOT_FOUND,
+        NifVerificationStatus.UNAVAILABLE,
+        NifVerificationStatus.FAILED,
+    }:
+        raise ValueError("NIF completion status is not terminal")
+
+
+def _require_trusted_face_failure_code(code: str) -> None:
+    if code not in _FACE_MATCH_FAILURE_CODES:
+        raise ValueError("Face-match failure code is not trusted")
+
+
+def _accept_document_capture(
+    record: _SessionRecord,
+    side: DocumentSide,
+    content: bytes,
+    assessment: CaptureAssessment,
+    portrait_artifacts: InMemoryPortraitArtifactStore | None,
+    ttl: timedelta,
+) -> DocumentCaptureTransition:
+    document = record.document
+    if record.status != VerificationStatus.IN_PROGRESS:
+        raise SessionConflict("Captures cannot be changed after verification ends")
+    if document.status != DocumentStatus.AWAITING_CAPTURE:
+        raise SessionConflict("Captures cannot be changed after capture completion")
+    if side == DocumentSide.FRONT:
+        document.front = bytes(content)
+        document.front_capture = assessment
+        document.front_capture_accepted = True
+    else:
+        document.back = bytes(content)
+        document.back_capture = assessment
+        document.back_capture_accepted = True
+    document.error_code = None
+    _refresh_expiry(record, ttl)
+    record.event_sequence += 1
+    accepted = _snapshot(record)
+
+    completed: SessionSnapshot | None = None
+    if document.front is not None and document.back is not None:
+        document.status = DocumentStatus.READY
+        record.liveness.status = LivenessStatus.READY
+        record.event_sequence += 1
+        completed = _snapshot(record)
+    return DocumentCaptureTransition(
+        snapshot=completed or accepted,
+        capture_accepted=accepted,
+        capture_completed=completed,
+    )
+
+
+def _queue_document_processing(record: _SessionRecord, ttl: timedelta) -> None:
+    document = record.document
+    if record.status != VerificationStatus.IN_PROGRESS:
+        raise SessionConflict("Verification is no longer active")
+    if document.status != DocumentStatus.READY:
+        raise SessionConflict("Document processing is not ready to queue")
+    if document.front is None or document.back is None:
+        raise SessionConflict("Both document sides must be accepted")
+    document.job_id = uuid4().hex
+    document.status = DocumentStatus.QUEUED
+    document.error_code = None
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _begin_document_processing(
+    record: _SessionRecord, job_id: str, ttl: timedelta
+) -> tuple[bytes, bytes]:
+    document = record.document
+    if (
+        record.status != VerificationStatus.IN_PROGRESS
+        or document.status != DocumentStatus.QUEUED
+        or document.job_id != job_id
+        or document.front is None
+        or document.back is None
+    ):
+        raise SessionConflict("The queued document job is no longer available")
+    document.status = DocumentStatus.PROCESSING
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+    return document.front, document.back
+
+
+def _can_finish_document_job(record: _SessionRecord | None, job_id: str) -> bool:
+    return bool(
+        record is not None
+        and record.status == VerificationStatus.IN_PROGRESS
+        and record.document.job_id == job_id
+        and record.document.status == DocumentStatus.PROCESSING
+    )
+
+
+def _complete_document_processing(
+    record: _SessionRecord,
+    result: DocumentExtractionResult,
+    portrait_artifacts: InMemoryPortraitArtifactStore | None,
+    ttl: timedelta,
+) -> None:
+    document = record.document
+    artifact_ids = _portrait_artifact_ids(result)
+    if artifact_ids and result.status == ProcessingStatus.FAILED:
+        if portrait_artifacts is not None:
+            portrait_artifacts.release_pending(artifact_ids)
+        artifact_ids = ()
+    if artifact_ids and (
+        portrait_artifacts is None
+        or not portrait_artifacts.claim(artifact_ids, record.session_id)
+    ):
+        if portrait_artifacts is not None:
+            portrait_artifacts.release_pending(artifact_ids)
+        _clear_document_sources(document)
+        document.result = None
+        document.error_code = "PORTRAIT_ARTIFACT_CLAIM_FAILED"
+        document.status = DocumentStatus.FAILED
+        _refresh_verification_failure(record)
+        record.event_sequence += 1
+        _refresh_expiry(record, ttl)
+        return
+    _clear_document_sources(document)
+    document.result = result
+    document.error_code = None
+    document.status = {
+        ProcessingStatus.SUCCESS: DocumentStatus.PASSED,
+        ProcessingStatus.PARTIAL: DocumentStatus.PARTIAL,
+        ProcessingStatus.FAILED: DocumentStatus.FAILED,
+    }[result.status]
+    # Defer aggregate completion until the post-extraction NIF
+    # orchestrator has either claimed applicable work or explicitly
+    # settled a safe skipped state.
+    if record.nif_verification_enabled and result.status == ProcessingStatus.SUCCESS:
+        record.nif_verification.settled = False
+        record.nif_verification.not_run_reason = ""
+    _refresh_face_match_readiness(record)
+    _refresh_verification_completion(record)
+    _refresh_verification_failure(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _fail_document_processing(record: _SessionRecord, code: str, ttl: timedelta) -> None:
+    document = record.document
+    _clear_document_sources(document)
+    document.result = None
+    document.error_code = code
+    document.status = DocumentStatus.FAILED
+    _refresh_verification_failure(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _start_liveness(record: _SessionRecord, ttl: timedelta) -> None:
+    if record.status != VerificationStatus.IN_PROGRESS:
+        raise SessionConflict("Verification is no longer active")
+    if record.liveness.status != LivenessStatus.READY:
+        raise SessionConflict("Liveness is not ready to start")
+    record.liveness.status = LivenessStatus.PROCESSING
+    record.liveness.error_code = None
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _complete_liveness(
+    record: _SessionRecord,
+    result: LivenessResult,
+    live_face_artifact_id: str | None,
+    live_face_eligible: bool,
+    portrait_artifacts: InMemoryPortraitArtifactStore | None,
+    ttl: timedelta,
+) -> None:
+    claimed_artifact_id = None
+    if live_face_artifact_id is not None and result.passed and live_face_eligible:
+        if portrait_artifacts is not None and portrait_artifacts.claim(
+            (live_face_artifact_id,), record.session_id
+        ):
+            claimed_artifact_id = live_face_artifact_id
+        else:
+            _release_pending_live_face(live_face_artifact_id, portrait_artifacts)
+    elif live_face_artifact_id is not None:
+        _release_pending_live_face(live_face_artifact_id, portrait_artifacts)
+    record.liveness.result = result
+    record.liveness.live_face_artifact_id = claimed_artifact_id
+    record.liveness.live_face_eligible = claimed_artifact_id is not None
+    record.liveness.status = (
+        LivenessStatus.PASSED if result.passed else LivenessStatus.FAILED
+    )
+    record.liveness.error_code = (
+        None if result.passed else "PASSIVE_LIVENESS_FAILED"
+    )
+    _refresh_face_match_readiness(record)
+    _refresh_verification_completion(record)
+    _refresh_verification_failure(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _release_pending_live_face(
+    artifact_id: str | None, portrait_artifacts: InMemoryPortraitArtifactStore | None
+) -> None:
+    if artifact_id is not None and portrait_artifacts is not None:
+        portrait_artifacts.release_pending((artifact_id,))
+
+
+def _release_owned_live_face(
+    record: _SessionRecord, portrait_artifacts: InMemoryPortraitArtifactStore | None
+) -> None:
+    if (
+        record.liveness.live_face_artifact_id is not None
+        and portrait_artifacts is not None
+    ):
+        portrait_artifacts.release_owned(
+            (record.liveness.live_face_artifact_id,), record.session_id
+        )
+    record.liveness.live_face_artifact_id = None
+    record.liveness.live_face_eligible = False
+    record.face_match.similarity = None
+    record.face_match.error_code = None
+
+
+def _release_face_match_biometric_artifacts(
+    record: _SessionRecord, portrait_artifacts: InMemoryPortraitArtifactStore | None
+) -> None:
+    portrait_id = _face_match_portrait_artifact_id(record.document.result)
+    live_id = record.liveness.live_face_artifact_id
+    artifact_ids = tuple(
+        artifact_id
+        for artifact_id in (portrait_id, live_id)
+        if artifact_id is not None
+    )
+    if artifact_ids and portrait_artifacts is not None:
+        portrait_artifacts.release_owned(artifact_ids, record.session_id)
+    if portrait_id is not None:
+        record.document.result = _clear_portrait_artifact_id(record.document.result)
+    record.liveness.live_face_artifact_id = None
+    record.liveness.live_face_eligible = False
+
+
+def _settle_nif_not_run(record: _SessionRecord, reason: str, ttl: timedelta) -> None:
+    state = record.nif_verification
+    state.status = NifVerificationStatus.NOT_RUN
+    state.source = None
+    state.name_match = None
+    state.not_run_reason = reason
+    state.error_code = None
+    state.settled = True
+    _refresh_verification_completion(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _claim_nif_verification(
+    record: _SessionRecord, ttl: timedelta
+) -> tuple[str, str | None]:
+    """Claim applicable registry work or settle a safe skipped state."""
+    candidate = _nif_candidate(record.document.result)
+    if not record.nif_verification_enabled:
+        _settle_nif_not_run(record, "disabled", ttl)
+        return "", None
+    if candidate is None:
+        reason = (
+            "identifier_unavailable"
+            if _nif_profile_present(record.document.result)
+            else "not_applicable"
+        )
+        _settle_nif_not_run(record, reason, ttl)
+        return "", None
+    nif, claimed_name = candidate
+    nif_state = record.nif_verification
+    nif_state.status = NifVerificationStatus.PROCESSING
+    nif_state.source = "minfin"
+    nif_state.name_match = None
+    nif_state.not_run_reason = ""
+    nif_state.error_code = None
+    nif_state.settled = False
+    nif_state.attempted = True
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+    return nif, claimed_name
+
+
+def _fail_nif_dispatch_capacity(record: _SessionRecord, ttl: timedelta) -> None:
+    state = record.nif_verification
+    state.status = NifVerificationStatus.FAILED
+    state.source = None
+    state.name_match = None
+    state.error_code = "NIF_VERIFIER_CAPACITY_EXCEEDED"
+    state.settled = True
+    _refresh_verification_completion(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _complete_nif_verification(
+    record: _SessionRecord,
+    status: NifVerificationStatus,
+    source: str | None,
+    name_match: bool | None,
+    error_code: str | None,
+    ttl: timedelta,
+) -> None:
+    state = record.nif_verification
+    state.status = status
+    state.source = source
+    state.name_match = name_match if status == NifVerificationStatus.VERIFIED else None
+    state.error_code = error_code
+    state.settled = True
+    if status == NifVerificationStatus.NOT_FOUND:
+        record.status = VerificationStatus.FAILED
+    else:
+        _refresh_verification_completion(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _start_face_match(record: _SessionRecord, ttl: timedelta) -> None:
+    if record.status != VerificationStatus.IN_PROGRESS:
+        raise SessionConflict("Verification is no longer active")
+    if record.face_match.status != FaceMatchStatus.READY:
+        raise SessionConflict("Face matching is not ready to start")
+    record.face_match.status = FaceMatchStatus.PROCESSING
+    record.face_match.error_code = None
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _complete_face_match(record: _SessionRecord, similarity: float, ttl: timedelta) -> None:
+    record.face_match.status = FaceMatchStatus.COMPLETED
+    record.face_match.similarity = float(similarity)
+    record.face_match.error_code = None
+    _refresh_verification_completion(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _fail_face_match(record: _SessionRecord, code: str, ttl: timedelta) -> None:
+    record.face_match.status = FaceMatchStatus.FAILED
+    record.face_match.similarity = None
+    record.face_match.error_code = code
+    _refresh_verification_failure(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _fail_liveness(
+    record: _SessionRecord,
+    code: str,
+    portrait_artifacts: InMemoryPortraitArtifactStore | None,
+    ttl: timedelta,
+) -> None:
+    _release_owned_live_face(record, portrait_artifacts)
+    record.liveness.result = None
+    record.liveness.error_code = code
+    record.liveness.status = LivenessStatus.FAILED
+    _refresh_verification_failure(record)
+    record.event_sequence += 1
+    _refresh_expiry(record, ttl)
+
+
+def _nif_blocks_completion(record: _SessionRecord) -> bool:
+    if not record.nif_verification_enabled:
+        return False
+    # The post-extraction resolver must record whether the check is
+    # disabled, inapplicable, identifier-unavailable, or claimed. This
+    # brief pending state prevents a successful document from completing
+    # before that decision is made.
+    return not record.nif_verification.settled
+
+
+def _refresh_verification_completion(record: _SessionRecord) -> bool:
+    if record.status != VerificationStatus.IN_PROGRESS:
+        return False
+    if record.document.status != DocumentStatus.PASSED:
+        return False
+    if _nif_blocks_completion(record):
+        return False
+    if record.liveness_required and record.liveness.status != LivenessStatus.PASSED:
+        return False
+    if (
+        record.face_match_required
+        and record.face_match.status != FaceMatchStatus.COMPLETED
+    ):
+        return False
+    record.status = VerificationStatus.COMPLETED
+    return True
+
+
+def _refresh_verification_failure(record: _SessionRecord) -> bool:
+    if record.status != VerificationStatus.IN_PROGRESS:
+        return False
+    if record.document.status in {DocumentStatus.PARTIAL, DocumentStatus.FAILED}:
+        record.status = VerificationStatus.FAILED
+        return True
+    if record.liveness_required and record.liveness.status == LivenessStatus.FAILED:
+        record.status = VerificationStatus.FAILED
+        return True
+    if record.face_match_required and record.face_match.status == FaceMatchStatus.FAILED:
+        record.status = VerificationStatus.FAILED
+        return True
+    return False
+
+
+def _refresh_face_match_readiness(record: _SessionRecord) -> bool:
+    """Advance only BLOCKED sessions once every configured input is usable."""
+    if (
+        not record.face_match_required
+        or record.face_match.status != FaceMatchStatus.BLOCKED
+        or record.status != VerificationStatus.IN_PROGRESS
+        or record.document.status != DocumentStatus.PASSED
+        or record.liveness.status != LivenessStatus.PASSED
+        or _face_match_portrait_artifact_id(record.document.result) is None
+        or not record.liveness.live_face_eligible
+        or record.liveness.live_face_artifact_id is None
+    ):
+        return False
+    record.face_match.status = FaceMatchStatus.READY
+    return True
 
 
 def _now() -> datetime:

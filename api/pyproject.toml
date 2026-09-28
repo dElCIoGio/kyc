@@ -9,6 +9,7 @@ description = "Session-based FastAPI service for the Angolan KYC engine"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.16,<2",
     "angolan-kyc-engine>=0.1,<0.2",
     "fastapi>=0.116,<1",
     "opentelemetry-sdk>=1.0,<2",
@@ -16,6 +17,8 @@ dependencies = [
     "uvicorn[standard]>=0.35,<1",
     "pydantic-settings>=2.10,<3",
     "python-multipart>=0.0.20,<1",
+    "psycopg[binary]>=3.2,<4",
+    "SQLAlchemy>=2.0,<3",
     "nif-checker>=0.1,<0.2",
 ]
 
@@ -27,4 +30,14 @@ dev = ["build>=1,<2", "httpx>=0.28,<1"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-kyc_api = ["verify/dist/index.html", "verify/dist/assets/**/*"]
+kyc_api = [
+    "verify/dist/index.html",
+    "verify/dist/assets/**/*",
+    "infrastructure/persistence/alembic.ini",
+    "infrastructure/persistence/migrations/env.py",
+    "infrastructure/persistence/migrations/script.py.mako",
+    "infrastructure/persistence/migrations/versions/*.py",
+]
+
+[project.scripts]
+kyc-api-migrate = "kyc_api.infrastructure.persistence.migrate:main"

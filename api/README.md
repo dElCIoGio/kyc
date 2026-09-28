@@ -1,5 +1,26 @@
 # Angolan KYC API
 
+## Persistence
+
+The API defaults to the process-local `memory` session backend for direct test
+and development use. Set `KYC_SESSION_BACKEND=postgres` together with a secret
+`KYC_DATABASE_URL` to use durable PostgreSQL persistence. PostgreSQL mode fails
+startup when the database is unavailable or its Alembic revision is not the
+packaged head; it never falls back to memory and never runs migrations itself.
+
+Run packaged migrations before starting the API:
+
+```console
+kyc-api-migrate upgrade head
+```
+
+The database contains extracted identity data. Backups, replicas, access
+controls, and retention must therefore be treated as sensitive. Raw document
+captures, liveness frames, face artifacts, embeddings, and similarity values
+remain process-local and do not survive restart. Webhook delivery from the
+PostgreSQL outbox is durable and at-least-once; consumers should deduplicate by
+the stable event ID.
+
 This project exposes the installed `angolan-kyc-engine` library through a
 session-based FastAPI service. It accepts explicitly labelled front and back
 images, runs extraction in a bounded background thread, and retains the

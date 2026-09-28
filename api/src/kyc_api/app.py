@@ -85,6 +85,10 @@ from .application.sessions.store import (
 from .settings import ApiSettings
 from .application.verification.service import LivenessSubmissionError, VerificationManager
 from .infrastructure.webhooks.outbox import WebhookDispatcher, WebhookOutbox
+from .infrastructure.persistence.database import create_database_engine, verify_database
+from .infrastructure.persistence.postgres_sessions import PostgresSessionStore
+from .infrastructure.persistence.browser_credentials import PostgresBrowserCredentialStore
+from .infrastructure.persistence.webhook_outbox import PostgresWebhookOutbox
 
 
 _ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png"}
@@ -117,6 +121,7 @@ def create_app(
         resolved_settings = settings or ApiSettings()  # type: ignore[call-arg]
         face_match_dispatcher: FaceMatchDispatcher | None = None
         resolved_nif_dispatcher: NifVerificationDispatcher | None = None
+        database_engine = None
         configure_logging(
             level=resolved_settings.log_level,
             environment=resolved_settings.environment,
@@ -169,14 +174,34 @@ def create_app(
                 resolved_face_recognizer is not None
                 and resolved_liveness_evaluator is not None
             )
-            resolved_store = session_store or SessionStore(
-                ttl_seconds=resolved_settings.session_ttl_seconds,
-                max_sessions=resolved_settings.max_sessions,
-                portrait_artifacts=resolved_artifacts,
-                liveness_required=resolved_liveness_evaluator is not None,
-                face_match_enabled=face_comparison_required,
-                nif_verification_enabled=resolved_settings.nif_verification_enabled,
-            )
+            if session_store is not None:
+                resolved_store = session_store
+            elif resolved_settings.session_backend == "postgres":
+                assert resolved_settings.database_url is not None
+                database_url = resolved_settings.database_url.get_secret_value()
+                database_engine = create_database_engine(database_url)
+                verify_database(database_engine, database_url)
+                resolved_store = PostgresSessionStore(
+                    engine=database_engine,
+                    ttl_seconds=resolved_settings.session_ttl_seconds,
+                    max_sessions=resolved_settings.max_sessions,
+                    portrait_artifacts=resolved_artifacts,
+                    liveness_required=resolved_liveness_evaluator is not None,
+                    face_match_enabled=face_comparison_required,
+                    nif_verification_enabled=resolved_settings.nif_verification_enabled,
+                    webhook_enabled=resolved_settings.webhook_enabled,
+                    webhook_retention_seconds=resolved_settings.webhook_retention_seconds,
+                )
+                resolved_store.recover()
+            else:
+                resolved_store = SessionStore(
+                    ttl_seconds=resolved_settings.session_ttl_seconds,
+                    max_sessions=resolved_settings.max_sessions,
+                    portrait_artifacts=resolved_artifacts,
+                    liveness_required=resolved_liveness_evaluator is not None,
+                    face_match_enabled=face_comparison_required,
+                    nif_verification_enabled=resolved_settings.nif_verification_enabled,
+                )
             if session_store is not None:
                 resolved_store.configure_requirements(
                     liveness_required=resolved_liveness_evaluator is not None,
@@ -232,34 +257,60 @@ def create_app(
                 max_requests=resolved_settings.browser_rate_limit_requests,
                 window_seconds=resolved_settings.rate_limit_window_seconds,
             )
-            browser_credentials = BrowserCredentialStore(
-                sessions=resolved_store,
-                ttl_seconds=resolved_settings.browser_token_ttl_seconds,
+            postgres_store = isinstance(resolved_store, PostgresSessionStore)
+            if postgres_store:
+                resolved_store.configure_webhooks(
+                    enabled=resolved_settings.webhook_enabled,
+                    retention_seconds=resolved_settings.webhook_retention_seconds,
+                )
+                if session_store is not None:
+                    resolved_store.recover()
+            browser_credentials = (
+                PostgresBrowserCredentialStore(
+                    engine=resolved_store.engine,
+                    sessions=resolved_store,
+                    ttl_seconds=resolved_settings.browser_token_ttl_seconds,
+                )
+                if postgres_store
+                else BrowserCredentialStore(
+                    sessions=resolved_store,
+                    ttl_seconds=resolved_settings.browser_token_ttl_seconds,
+                )
             )
             resolved_dispatcher = webhook_dispatcher
             if resolved_dispatcher is None and resolved_settings.webhook_enabled:
                 assert resolved_settings.webhook_url is not None
                 assert resolved_settings.webhook_secret is not None
-                resolved_dispatcher = WebhookDispatcher(
-                    outbox=WebhookOutbox(
+                resolved_outbox = (
+                    PostgresWebhookOutbox(
+                        resolved_store.engine,
+                        retention_seconds=resolved_settings.webhook_retention_seconds,
+                        lease_seconds=max(30.0, resolved_settings.webhook_timeout_seconds + 5.0),
+                    )
+                    if postgres_store
+                    else WebhookOutbox(
                         resolved_settings.webhook_outbox_path,
                         retention_seconds=resolved_settings.webhook_retention_seconds,
-                    ),
+                    )
+                )
+                resolved_dispatcher = WebhookDispatcher(
+                    outbox=resolved_outbox,
                     url=resolved_settings.webhook_url,
                     secret=resolved_settings.webhook_secret.get_secret_value(),
                     timeout_seconds=resolved_settings.webhook_timeout_seconds,
                 )
                 resolved_dispatcher.start()
+            lifecycle_publisher = (
+                None
+                if postgres_store
+                else (resolved_dispatcher.enqueue if resolved_dispatcher is not None else None)
+            )
             orchestrator = (
                 VerificationOrchestrator(
                     store=resolved_store,
                     face_comparison_service=resolved_face_comparison,
                     dispatcher=face_match_dispatcher,
-                    snapshot_publisher=(
-                        resolved_dispatcher.enqueue
-                        if resolved_dispatcher is not None
-                        else None
-                    ),
+                    snapshot_publisher=lifecycle_publisher,
                 )
                 if resolved_face_comparison is not None
                 else None
@@ -269,9 +320,7 @@ def create_app(
                     store=resolved_store,
                     dispatcher=resolved_nif_dispatcher,
                     metrics=resolved_metrics,
-                    snapshot_publisher=(
-                        resolved_dispatcher.enqueue if resolved_dispatcher is not None else None
-                    ),
+                    snapshot_publisher=lifecycle_publisher,
                 )
                 if resolved_nif_dispatcher is not None
                 else None
@@ -291,9 +340,7 @@ def create_app(
                 timeout_seconds=resolved_settings.job_timeout_seconds,
                 metrics=resolved_metrics,
                 executor=executor,
-                webhook_publisher=resolved_dispatcher.enqueue
-                if resolved_dispatcher is not None
-                else None,
+                webhook_publisher=lifecycle_publisher,
                 on_document_state_changed=on_document_state_changed,
             )
             verification_manager = VerificationManager(
@@ -303,11 +350,7 @@ def create_app(
                 liveness_evaluator=resolved_liveness_evaluator,
                 liveness_intake=resolved_liveness_intake,
                 orchestrator=orchestrator,
-                snapshot_publisher=(
-                    resolved_dispatcher.enqueue
-                    if resolved_dispatcher is not None
-                    else None
-                ),
+                snapshot_publisher=lifecycle_publisher,
             )
             if telemetry_export is not None:
                 logger.info(
@@ -322,6 +365,8 @@ def create_app(
                 resolved_nif_dispatcher.shutdown()
             if face_match_dispatcher is not None:
                 face_match_dispatcher.shutdown()
+            if database_engine is not None:
+                database_engine.dispose()
             logger.exception(
                 "application startup failed",
                 extra={
@@ -373,6 +418,8 @@ def create_app(
                 resolved_nif_dispatcher.shutdown()
             if resolved_dispatcher is not None:
                 resolved_dispatcher.shutdown()
+            if database_engine is not None:
+                database_engine.dispose()
             telemetry_timeout_millis = round(
                 resolved_settings.otel_export_timeout_seconds * 1000
             )
@@ -502,7 +549,7 @@ def create_app(
     def create_session(request: Request) -> SessionResponse:
         created = request.app.state.sessions.create()
         dispatcher = request.app.state.webhook_dispatcher
-        if dispatcher is not None:
+        if dispatcher is not None and not getattr(request.app.state.sessions, "atomic_webhooks", False):
             dispatcher.enqueue(created, "verification.session.created")
         return session_response(created)
 

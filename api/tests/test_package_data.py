@@ -13,6 +13,9 @@ class PackageDataTests(unittest.TestCase):
 
         self.assertIn("verify/dist/index.html", package_data)
         self.assertIn("verify/dist/assets/**/*", package_data)
+        self.assertIn("infrastructure/persistence/alembic.ini", package_data)
+        self.assertIn("infrastructure/persistence/migrations/env.py", package_data)
+        self.assertIn("infrastructure/persistence/migrations/versions/*.py", package_data)
 
 
 if __name__ == "__main__":

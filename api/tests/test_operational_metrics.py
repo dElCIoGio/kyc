@@ -157,6 +157,33 @@ class OperationalMetricsTests(unittest.TestCase):
                             .isdisjoint(point.attributes)
                         )
 
+    def test_nif_metrics_are_duration_bearing_and_identity_free(self) -> None:
+        self.registry.record_nif_verification(
+            outcome="verified", operation="session", duration_seconds=0.012
+        )
+        self.registry.record_nif_verification(
+            outcome="unavailable", operation="standalone", duration_seconds=0.034
+        )
+        self.registry.record_nif_capacity_rejected(operation="standalone")
+
+        self.assertEqual(
+            {
+                ("operation", "session", "outcome", "verified", "provider", "minfin"): 1,
+                ("operation", "standalone", "outcome", "unavailable", "provider", "minfin"): 1,
+            },
+            self._counter_values("nif_verification_outcome"),
+        )
+        durations = self._histogram_points("nif_verification_duration")
+        self.assertEqual(2, sum(point.count for point in durations))
+        self.assertTrue(all(point.sum > 0 for point in durations))
+        self.assertEqual(
+            {("operation", "standalone"): 1},
+            self._counter_values("nif_dispatch_capacity_rejected"),
+        )
+        metric_dump = repr(self.reader.get_metrics_data())
+        self.assertNotIn("007096754LA043", metric_dump)
+        self.assertNotIn("Ana Silva", metric_dump)
+
     def _run_job(self, coordinator, *, timer_factory=None) -> None:
         store = SessionStore(ttl_seconds=60, max_sessions=2)
         session_id = store.create().session_id

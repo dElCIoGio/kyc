@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from kyc_engine import DocumentExtractionResult, KycExtractionResult, ProcessingStatus
 from kyc_engine.contracts import ExtractedField, FieldStatus
 from kyc_api.main import create_app
+from kyc_api.metrics import MetricsRegistry
 from kyc_api.models import NifVerificationStatus
 from kyc_api.nif import (
     MinfinNifVerifier,
@@ -55,6 +56,38 @@ class _RawChecker:
         self.closed = True
 
 
+class _RecordingMetrics(MetricsRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.nif_verifications: list[dict[str, object]] = []
+        self.capacity_rejections: list[str] = []
+
+    def record_nif_verification(
+        self, *, outcome: str, operation: str, duration_seconds: float
+    ) -> None:
+        self.nif_verifications.append(
+            {
+                "outcome": outcome,
+                "operation": operation,
+                "duration_seconds": duration_seconds,
+            }
+        )
+
+    def record_nif_capacity_rejected(self, *, operation: str) -> None:
+        self.capacity_rejections.append(operation)
+
+
+class _CapacityDispatcher:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def submit_standalone(self, _nif: str, _claimed_name: str | None):
+        raise NifVerifierCapacityExceeded()
+
+    def shutdown(self) -> None:
+        self.closed = True
+
+
 def _document(*, identifier: str | None = "007096754LA043", name: str | None = "Ana Silva") -> DocumentExtractionResult:
     fields = {}
     if identifier is not None:
@@ -77,12 +110,16 @@ def _document(*, identifier: str | None = "007096754LA043", name: str | None = "
 
 class NifApiTests(unittest.TestCase):
     def test_standalone_uses_safe_shared_semantics(self) -> None:
-        verifier = _Verifier(NifVerificationResult(NifVerificationStatus.VERIFIED, "minfin", True))
+        verifier = _Verifier(
+            NifVerificationResult(NifVerificationStatus.VERIFIED, "minfin", True), delay=0.01
+        )
+        metrics = _RecordingMetrics()
         with TestClient(
             create_app(
                 settings=settings(nif_verification_enabled=True),
                 coordinator=FakeCoordinator(),
                 nif_verifier=verifier,
+                metrics=metrics,
             )
         ) as client:
             response = client.post(
@@ -96,6 +133,11 @@ class NifApiTests(unittest.TestCase):
             self.assertEqual([("007096754LA043", "Ana Silva")], verifier.calls)
             self.assertEqual(401, client.post("/v1/verifications/nif", json={"nif": "x"}).status_code)
         self.assertTrue(verifier.closed)
+        self.assertEqual(1, len(metrics.nif_verifications))
+        standalone_metric = metrics.nif_verifications[0]
+        self.assertEqual("standalone", standalone_metric["operation"])
+        self.assertEqual("verified", standalone_metric["outcome"])
+        self.assertGreater(float(standalone_metric["duration_seconds"]), 0.0)
 
     def test_minfin_adapter_keeps_identifier_and_name_signals_separate(self) -> None:
         async def run():
@@ -116,14 +158,38 @@ class NifApiTests(unittest.TestCase):
         self.assertEqual(NifVerificationStatus.FAILED, malformed.status)
         self.assertEqual(NifVerificationStatus.NOT_FOUND, absent.status)
 
+    def test_standalone_capacity_rejection_keeps_its_metric(self) -> None:
+        dispatcher = _CapacityDispatcher()
+        metrics = _RecordingMetrics()
+        with TestClient(
+            create_app(
+                settings=settings(nif_verification_enabled=True),
+                coordinator=FakeCoordinator(),
+                metrics=metrics,
+                nif_dispatcher=dispatcher,  # type: ignore[arg-type]
+            )
+        ) as client:
+            response = client.post(
+                "/v1/verifications/nif", headers=AUTH_HEADERS, json={"nif": "007096754LA043"}
+            )
+        self.assertEqual(503, response.status_code)
+        self.assertEqual("NIF_VERIFIER_CAPACITY_EXCEEDED", response.json()["error"]["code"])
+        self.assertEqual(["standalone"], metrics.capacity_rejections)
+        self.assertEqual([], metrics.nif_verifications)
+        self.assertTrue(dispatcher.closed)
+
     def test_profile_scoped_session_trigger_and_not_found_failure(self) -> None:
-        verifier = _Verifier(NifVerificationResult(NifVerificationStatus.NOT_FOUND, "minfin"))
+        verifier = _Verifier(
+            NifVerificationResult(NifVerificationStatus.NOT_FOUND, "minfin"), delay=0.01
+        )
         coordinator = FakeCoordinator()
         coordinator.output = _document()
+        metrics = _RecordingMetrics()
         with TestClient(
             create_app(
                 settings=settings(nif_verification_enabled=True), coordinator=coordinator,
                 nif_verifier=verifier,
+                metrics=metrics,
             )
         ) as client:
             session_id = client.post("/v1/sessions", headers=AUTH_HEADERS).json()["session_id"]
@@ -143,6 +209,14 @@ class NifApiTests(unittest.TestCase):
             self.assertEqual(NifVerificationStatus.NOT_FOUND, snapshot.nif_verification_status)
             self.assertEqual("minfin", snapshot.nif_verification_source)
             self.assertEqual("failed", snapshot.verification_status.value)
+            deadline = time.time() + 2
+            while time.time() < deadline and not metrics.nif_verifications:
+                time.sleep(0.01)
+            self.assertEqual(1, len(metrics.nif_verifications))
+            session_metric = metrics.nif_verifications[0]
+            self.assertEqual("session", session_metric["operation"])
+            self.assertEqual("not_found", session_metric["outcome"])
+            self.assertGreater(float(session_metric["duration_seconds"]), 0.0)
 
 
 class NifDispatcherTests(unittest.TestCase):

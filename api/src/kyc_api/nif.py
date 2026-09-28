@@ -9,7 +9,7 @@ import threading
 import unicodedata
 from collections.abc import Callable
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Protocol
 
@@ -23,10 +23,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class NifVerificationResult:
+    """Internal verifier result; duration is intentionally never serialized."""
+
     status: NifVerificationStatus
     source: str | None
     name_match: bool | None = None
     error_code: str | None = None
+    duration_seconds: float = 0.0
 
 
 class NifVerifier(Protocol):
@@ -229,6 +232,11 @@ class NifVerificationDispatcher:
                         "minfin",
                         error_code="NIF_VERIFICATION_FAILED",
                     )
+                # The dispatcher owns the elapsed measurement because it owns
+                # the sole browser-affine verifier call.  Retain it only for
+                # internal metrics, never in public/session models.
+                duration_seconds = max(perf_counter() - started, 1e-9)
+                result = replace(result, duration_seconds=duration_seconds)
                 if not task.future.cancelled():
                     task.future.set_result(result)
                 reset = getattr(verifier, "reset_after_failure", None)
@@ -243,7 +251,7 @@ class NifVerificationDispatcher:
                         "event": f"nif.verification_{result.status.value}",
                         "provider": result.source,
                         "status": result.status.value,
-                        "duration_ms": round((perf_counter() - started) * 1000, 3),
+                        "duration_ms": round(duration_seconds * 1000, 3),
                     },
                 )
         finally:
@@ -357,7 +365,9 @@ class NifVerificationOrchestrator:
             return
         if self._metrics is not None:
             self._metrics.record_nif_verification(
-                outcome=result.status.value, operation="session", duration_seconds=0.0
+                outcome=result.status.value,
+                operation="session",
+                duration_seconds=result.duration_seconds,
             )
         self._publish(settled, "nif.completed")
         self._publish_terminal(settled)

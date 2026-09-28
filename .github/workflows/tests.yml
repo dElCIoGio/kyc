@@ -62,7 +62,12 @@ jobs:
       - name: Install engine and API test dependencies
         run: |
           python -m pip install -e .
+          # nif-checker is a repository-local package.  Install it before the
+          # API so the API's normal distribution dependency is satisfied
+          # without requiring a published checker on an external index.
+          python -m pip install -e ./nif-checker
           python -m pip install -e "api[dev]"
+          python -c "from nif_checker import AGTNIFVerifier; assert AGTNIFVerifier"
 
       - name: Build hosted verifier
         working-directory: api/src/kyc_api/verify
@@ -76,7 +81,8 @@ jobs:
           PYTHONPATH: src:api/src
         run: python -m unittest discover -s api/tests -p "test_*.py" -v
 
-      - name: Build and inspect API wheel
+      - name: Build and inspect checker and API wheels
         run: |
+          python -m build --wheel --outdir nif-checker/dist nif-checker
           python -m build --wheel --outdir api/dist api
           python api/scripts/check_verifier_wheel.py api/dist/*.whl

@@ -8,7 +8,15 @@ from fastapi.testclient import TestClient
 
 from kyc_engine import LivenessResult, ProcessingStatus
 from kyc_api.main import create_app
-from kyc_api.models import CaptureStatus, DocumentSide, DocumentStatus, FaceMatchStatus, LivenessStatus, VerificationStatus
+from kyc_api.models import (
+    CaptureStatus,
+    DocumentSide,
+    DocumentStatus,
+    FaceMatchStatus,
+    LivenessStatus,
+    NifVerificationStatus,
+    VerificationStatus,
+)
 from kyc_api.projection import result_response, session_response
 from kyc_api.sessions import SessionStore, _now
 
@@ -113,6 +121,52 @@ class PublicSessionContractTests(unittest.TestCase):
         )
         self.assertEqual("failed", failed.status)
         self.assertIsNone(failed.next_action)
+
+    def test_nif_state_controls_public_technical_completion(self) -> None:
+        """NIF is part of technical completion, without making name fuzzy-match policy."""
+        store = SessionStore(ttl_seconds=60, max_sessions=1, liveness_required=False)
+        snapshot = store.create()
+        finished_inputs = replace(
+            snapshot,
+            document=replace(
+                snapshot.document,
+                status=DocumentStatus.PASSED,
+                front_capture=CaptureStatus.ACCEPTED,
+                back_capture=CaptureStatus.ACCEPTED,
+            ),
+            # This deliberately stale terminal value verifies the projection
+            # cannot expose completion while a claimed NIF call still runs.
+            verification_status=VerificationStatus.COMPLETED,
+        )
+
+        processing = session_response(
+            replace(
+                finished_inputs,
+                nif_verification_status=NifVerificationStatus.PROCESSING,
+                nif_verification_source="minfin",
+            )
+        )
+        self.assertEqual("in_progress", processing.status)
+        self.assertEqual("wait", processing.next_action)
+
+        for nif_status, verification_status, expected in (
+            (NifVerificationStatus.VERIFIED, VerificationStatus.COMPLETED, "completed"),
+            (NifVerificationStatus.UNAVAILABLE, VerificationStatus.COMPLETED, "completed"),
+            (NifVerificationStatus.FAILED, VerificationStatus.COMPLETED, "completed"),
+            (NifVerificationStatus.NOT_FOUND, VerificationStatus.FAILED, "failed"),
+        ):
+            with self.subTest(nif_status=nif_status):
+                response = session_response(
+                    replace(
+                        finished_inputs,
+                        verification_status=verification_status,
+                        nif_verification_status=nif_status,
+                        nif_verification_source="minfin",
+                        nif_name_match=False,
+                    )
+                )
+                self.assertEqual(expected, response.status)
+                self.assertIsNone(response.next_action)
 
     def test_result_projection_excludes_engine_and_biometric_fields(self) -> None:
         store = SessionStore(ttl_seconds=60, max_sessions=1, liveness_required=False)

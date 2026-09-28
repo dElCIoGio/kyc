@@ -482,7 +482,9 @@ def create_app(
             ) from exc
         result = await asyncio.wrap_future(completed)
         request.app.state.metrics.record_nif_verification(
-            outcome=result.status.value, operation="standalone", duration_seconds=0.0
+            outcome=result.status.value,
+            operation="standalone",
+            duration_seconds=result.duration_seconds,
         )
         return NifVerificationResponse(
             status=result.status, source=result.source, name_match=result.name_match

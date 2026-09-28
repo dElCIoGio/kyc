@@ -12,6 +12,7 @@ from .models import (
     LivenessStateResponse,
     LivenessStatus,
     NifVerificationResponse,
+    NifVerificationStatus,
     NextAction,
     PublicDocumentStatus,
     PublicFaceComparisonStatus,
@@ -21,6 +22,7 @@ from .models import (
     ResultIssueResponse,
     SessionResponse,
     SessionStatus,
+    VerificationStatus,
     VerificationResultResponse,
 )
 from .sessions import SessionSnapshot
@@ -111,6 +113,19 @@ def result_response(
 
 
 def _session_status(snapshot: SessionSnapshot) -> SessionStatus:
+    # SessionStore owns technical completion and authoritative failures.  Keep
+    # the projection aligned with that source of truth, while defending the
+    # public contract against a stale snapshot that still says completed while
+    # a NIF attempt is in flight.
+    if snapshot.verification_status == VerificationStatus.FAILED:
+        return SessionStatus.FAILED
+    if snapshot.nif_verification_status == NifVerificationStatus.NOT_FOUND:
+        return SessionStatus.FAILED
+    if snapshot.nif_verification_status == NifVerificationStatus.PROCESSING:
+        return SessionStatus.IN_PROGRESS
+    if snapshot.verification_status == VerificationStatus.COMPLETED:
+        return SessionStatus.COMPLETED
+
     # The engine uses PARTIAL when required document evidence is missing,
     # invalid, conflicting, or otherwise errored. It remains available in the
     # detailed result, but cannot satisfy the public technical workflow.

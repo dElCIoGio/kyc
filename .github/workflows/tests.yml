@@ -107,6 +107,11 @@ jobs:
           kyc-api-migrate upgrade head
           kyc-api-migrate upgrade head
 
+      - name: Validate Compose configuration and build images
+        run: |
+          docker compose config
+          docker compose build api migrate
+
       - name: Run API tests
         env:
           PYTHONPATH: src:api/src

@@ -361,19 +361,29 @@ OCR thread is allowed to finish before its worker slot is released.
 
 ## Data Handling
 
-Uploads, session state, and extraction results are memory-only. Image bytes are
-removed from the session immediately after processing and all retained state is
-removed on deletion or expiry. Sessions do not survive process restarts. Deleting
-a currently running session removes its tracked state but cannot interrupt native
-OCR work that has already started.
+With `KYC_SESSION_BACKEND=memory`, session lifecycle and extraction-result state
+are process-local: sessions do not survive restart and multiple Uvicorn workers
+have independent stores. With `KYC_SESSION_BACKEND=postgres`, safe workflow
+state and extraction results survive restart, while session, tombstone,
+browser-credential digest, and webhook-outbox state are shared through
+PostgreSQL. Database lifecycle transitions are concurrency-safe across
+processes.
+
+PostgreSQL does not persist raw document captures, biometric/model artifacts,
+or face similarity. Those inputs remain process-local, so startup recovery
+conservatively settles work interrupted by lost ephemeral inputs. PostgreSQL is
+not distributed or horizontally resumable OCR, liveness, or face-model
+execution; that requires external object storage and distributed job execution.
+Deleting a currently running session removes tracked state but cannot interrupt
+native OCR work already started.
 
 Liveness frames are not added to session state or `LivenessResult`. A selected
 reference frame, when needed for configured face comparison, remains transient
 and internal-only.
 
-The first version is intended for one trusted, single-process deployment. Running
-multiple Uvicorn workers creates independent session stores; use exactly one
-worker until a shared store and external queue are introduced.
+Webhook delivery is durable at-least-once in PostgreSQL mode; event IDs are
+stable so receivers can deduplicate. Database backups and replicas contain
+sensitive KYC data and must be protected accordingly.
 
 Keep Uvicorn access logs disabled with `--no-access-log`. The application does
 not log request bodies, filenames, source paths, image data, OCR output, or

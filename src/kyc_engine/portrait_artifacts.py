@@ -81,6 +81,27 @@ class InMemoryPortraitArtifactStore:
                     self._artifacts.pop(artifact_id, None)
                     self._cancel_pending_timer(artifact_id)
 
+    def _restore_owned_to_pending(self, artifact_ids: tuple[str, ...], session_id: str) -> None:
+        """Undo a just-claimed ownership transfer without exposing crop data.
+
+        This narrowly scoped operation is for a durable transaction that failed
+        after ``claim``.  It only affects artifacts still owned by the same
+        session, so it cannot be used to take or reassign another session's
+        crop.
+        """
+        with self._lock:
+            for artifact_id in set(artifact_ids):
+                artifact = self._artifacts.get(artifact_id)
+                if artifact is not None and artifact.owner_session_id == session_id:
+                    self._artifacts[artifact_id] = _Artifact(artifact.image, None)
+                    timer = Timer(
+                        self._pending_ttl_seconds,
+                        lambda artifact_id=artifact_id: self.release_pending((artifact_id,)),
+                    )
+                    timer.daemon = True
+                    self._pending_timers[artifact_id] = timer
+                    timer.start()
+
     def get(self, artifact_id: str, *, session_id: str) -> Image | None:
         """Return a readonly crop only to its owning in-process session."""
         with self._lock:

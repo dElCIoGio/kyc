@@ -7,6 +7,7 @@ import os
 from threading import Barrier
 import unittest
 
+import numpy as np
 from sqlalchemy import delete, func, select, text, update
 from fastapi.testclient import TestClient
 
@@ -23,9 +24,10 @@ from kyc_api.infrastructure.persistence.models import (
 )
 from kyc_api.infrastructure.persistence.postgres_sessions import PostgresSessionStore
 from kyc_api.infrastructure.persistence.webhook_outbox import PostgresWebhookOutbox
-from kyc_api.models import DocumentSide, FaceMatchStatus, NifVerificationStatus
-from kyc_engine import LivenessResult
+from kyc_api.models import DocumentSide, DocumentStatus, FaceMatchStatus, NifVerificationStatus
+from kyc_engine import LivenessResult, PortraitExtractionResult, PortraitStatus
 from kyc_engine.contracts import ExtractedField, FieldStatus
+from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
 from helpers import AUTH_HEADERS, PNG_BYTES, FakeCoordinator, accepted_capture_assessment, extraction_result, settings
 
@@ -61,6 +63,87 @@ class PostgresPersistenceTests(unittest.TestCase):
         }
         values.update(overrides)
         return PostgresSessionStore(**values)
+
+    @staticmethod
+    def _portrait_result(artifact_id: str):
+        source = extraction_result()
+        assert source.front is not None
+        portrait = PortraitExtractionResult(
+            status=PortraitStatus.AVAILABLE,
+            requested_region=None,
+            clamped_region=None,
+            face_detected=True,
+            face_count=1,
+            face=None,
+            eligible_for_face_match=True,
+            artifact_id=artifact_id,
+        )
+        return replace(source, front=replace(source.front, portrait=portrait))
+
+    def _running_document(self, store: PostgresSessionStore) -> tuple[str, str]:
+        session_id = store.create().session_id
+        for side in (DocumentSide.FRONT, DocumentSide.BACK):
+            store.accept_document_capture(session_id, side, PNG_BYTES, accepted_capture_assessment())
+        queued = store.queue_document_processing(session_id)
+        assert queued.document.job_id is not None
+        store.start_document_processing(session_id, queued.document.job_id)
+        return session_id, queued.document.job_id
+
+    def test_document_artifact_claim_is_compensated_when_outbox_write_fails(self) -> None:
+        artifacts = InMemoryPortraitArtifactStore()
+        store = self.store(webhook_enabled=True, portrait_artifacts=artifacts)
+        session_id, job_id = self._running_document(store)
+        artifact_id = artifacts.put(np.zeros((64, 64, 3), dtype=np.uint8))
+        original = store._insert_events
+        store._insert_events = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("outbox failed"))  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "outbox failed"):
+            store.complete_document_processing(session_id, job_id, self._portrait_result(artifact_id))
+        store._insert_events = original  # type: ignore[method-assign]
+        self.assertEqual(DocumentStatus.PROCESSING, store.get(session_id).document.status)
+        self.assertTrue(artifacts.exists(artifact_id))
+        self.assertIsNone(artifacts.get(artifact_id, session_id=session_id))
+        self.assertIsNotNone(store.complete_document_processing(session_id, job_id, self._portrait_result(artifact_id)))
+        self.assertIsNotNone(artifacts.get(artifact_id, session_id=session_id))
+
+    def test_liveness_artifact_claim_is_compensated_when_outbox_write_fails(self) -> None:
+        artifacts = InMemoryPortraitArtifactStore()
+        store = self.store(webhook_enabled=True, liveness_required=True, portrait_artifacts=artifacts)
+        session_id, job_id = self._running_document(store)
+        store.complete_document_processing(session_id, job_id, extraction_result())
+        store.start_liveness(session_id)
+        artifact_id = artifacts.put(np.zeros((64, 64, 3), dtype=np.uint8))
+        original = store._insert_events
+        store._insert_events = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("outbox failed"))  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "outbox failed"):
+            store.complete_liveness(session_id, LivenessResult(True, 0.9, 3, 3), artifact_id, True)
+        store._insert_events = original  # type: ignore[method-assign]
+        self.assertEqual("processing", store.get(session_id).liveness_status.value)
+        self.assertTrue(artifacts.exists(artifact_id))
+        self.assertIsNone(artifacts.get(artifact_id, session_id=session_id))
+        self.assertIsNotNone(store.complete_liveness(session_id, LivenessResult(True, 0.9, 3, 3), artifact_id, True))
+        self.assertIsNotNone(artifacts.get(artifact_id, session_id=session_id))
+
+    def test_runtime_only_face_artifact_cleanup_does_not_change_version_or_sequence(self) -> None:
+        store = self.store(face_match_enabled=True)
+        session_id = store.create().session_id
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(VerificationSession)
+                .where(VerificationSession.session_id == session_id)
+                .values(face_match_status=FaceMatchStatus.COMPLETED.value)
+            )
+        with self.engine.connect() as connection:
+            before = connection.execute(
+                select(VerificationSession.version, VerificationSession.event_sequence)
+                .where(VerificationSession.session_id == session_id)
+            ).one()
+        store.release_face_match_biometric_artifacts(session_id)
+        with self.engine.connect() as connection:
+            after = connection.execute(
+                select(VerificationSession.version, VerificationSession.event_sequence)
+                .where(VerificationSession.session_id == session_id)
+            ).one()
+        self.assertEqual(before, after)
 
     def test_document_workflow_and_result_survive_new_store(self) -> None:
         store = self.store()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from threading import RLock
 from typing import Any, Callable
@@ -76,6 +77,9 @@ _CAPACITY_LOCK_ID = 0x4B59435F434150  # stable "KYC_CAP" advisory lock key
 _CLEANUP_LOCK_ID = 0x4B59435F434C4E  # stable "KYC_CLN" advisory lock key
 _TOMBSTONE_LOCK_ID = 0x4B59435F544D42  # stable "KYC_TMB" advisory lock key
 _RECOVERY_LOCK_ID = 0x4B59435F524543  # stable "KYC_REC" advisory lock key
+_ACTIVE_ARTIFACT_EFFECTS: ContextVar["_ArtifactTransaction | None"] = ContextVar(
+    "postgres_artifact_effects", default=None
+)
 
 _DOCUMENT_PROCESSING = frozenset({DocumentStatus.QUEUED, DocumentStatus.PROCESSING})
 _DOCUMENT_RESULTS = frozenset(
@@ -94,6 +98,54 @@ class _RuntimeState:
     live_face_artifact_id: str | None = None
     live_face_eligible: bool = False
     face_similarity: float | None = None
+
+
+class _ArtifactTransaction:
+    """Stage destructive artifact cleanup and compensate pre-commit claims.
+
+    Portrait ownership is intentionally process-local.  Claims are made before
+    the SQL commit because they decide whether a transition may succeed; if the
+    database transaction aborts, those claims are restored to pending.  Releases
+    are harmless to defer and are applied only after the durable commit.
+    """
+
+    def __init__(self, store: InMemoryPortraitArtifactStore | None) -> None:
+        self._store = store
+        self._claims: list[tuple[tuple[str, ...], str]] = []
+        self._releases: list[tuple[str, tuple[str, ...], str | None]] = []
+        self._after_commit: list[Callable[[], None]] = []
+
+    def claim(self, artifact_ids: tuple[str, ...], session_id: str) -> bool:
+        if self._store is None or not self._store.claim(artifact_ids, session_id):
+            return False
+        self._claims.append((artifact_ids, session_id))
+        return True
+
+    def release_pending(self, artifact_ids: tuple[str, ...]) -> None:
+        self._releases.append(("pending", artifact_ids, None))
+
+    def release_owned(self, artifact_ids: tuple[str, ...], session_id: str) -> None:
+        self._releases.append(("owned", artifact_ids, session_id))
+
+    def after_commit(self, action: Callable[[], None]) -> None:
+        self._after_commit.append(action)
+
+    def commit(self) -> None:
+        if self._store is not None:
+            for kind, artifact_ids, session_id in self._releases:
+                if kind == "pending":
+                    self._store.release_pending(artifact_ids)
+                else:
+                    assert session_id is not None
+                    self._store.release_owned(artifact_ids, session_id)
+        for action in self._after_commit:
+            action()
+
+    def rollback(self) -> None:
+        if self._store is None:
+            return
+        for artifact_ids, session_id in reversed(self._claims):
+            self._store._restore_owned_to_pending(artifact_ids, session_id)
 
 
 class PostgresSessionStore(SessionStore):
@@ -155,30 +207,36 @@ class PostgresSessionStore(SessionStore):
 
     def create(self) -> SessionSnapshot:
         now = _now()
-        with self._runtime_lock, self._sessions.begin() as database:
-            database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CAPACITY_LOCK_ID})
-            self._expire_due_locked(database, now, skip_locked=False)
-            count = database.scalar(select(func.count()).select_from(VerificationSession)) or 0
-            if count >= self._max_sessions:
-                raise SessionCapacityExceeded("Session capacity has been reached")
-            record = _SessionRecord(
-                session_id=uuid4().hex,
-                status=VerificationStatus.IN_PROGRESS,
-                created_at=now,
-                expires_at=now + self._ttl,
-                document=_DocumentState(),
-                liveness=_LivenessState(),
-                face_match=_FaceMatchState(),
-                nif_verification=_NifVerificationState(),
-                liveness_required=self._liveness_required,
-                face_match_required=self._face_match_enabled,
-                nif_verification_enabled=self._nif_verification_enabled,
-            )
-            row = VerificationSession(session_id=record.session_id)
-            database.add(row)
-            self._write_record(row, record, version=1)
-            snapshot = _snapshot(record)
-            self._insert_events(database, snapshot, ("verification.session.created",))
+        effects = _ArtifactTransaction(self.portrait_artifacts)
+        try:
+            with self._runtime_lock, self._sessions.begin() as database:
+                database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CAPACITY_LOCK_ID})
+                self._expire_due_locked(database, now, skip_locked=False, effects=effects)
+                count = database.scalar(select(func.count()).select_from(VerificationSession)) or 0
+                if count >= self._max_sessions:
+                    raise SessionCapacityExceeded("Session capacity has been reached")
+                record = _SessionRecord(
+                    session_id=uuid4().hex,
+                    status=VerificationStatus.IN_PROGRESS,
+                    created_at=now,
+                    expires_at=now + self._ttl,
+                    document=_DocumentState(),
+                    liveness=_LivenessState(),
+                    face_match=_FaceMatchState(),
+                    nif_verification=_NifVerificationState(),
+                    liveness_required=self._liveness_required,
+                    face_match_required=self._face_match_enabled,
+                    nif_verification_enabled=self._nif_verification_enabled,
+                )
+                row = VerificationSession(session_id=record.session_id)
+                database.add(row)
+                self._write_record(row, record, version=1)
+                snapshot = _snapshot(record)
+                self._insert_events(database, snapshot, ("verification.session.created",))
+        except Exception:
+            effects.rollback()
+            raise
+        effects.commit()
         with self._runtime_lock:
             self._runtime[record.session_id] = _RuntimeState()
         return snapshot
@@ -222,7 +280,7 @@ class PostgresSessionStore(SessionStore):
         def _complete(record: _SessionRecord) -> SessionSnapshot | None:
             if not _can_finish_document_job(record, job_id):
                 return None
-            _complete_document_processing(record, result, self.portrait_artifacts, self._ttl)
+            _complete_document_processing(record, result, self._active_artifacts(), self._ttl)
             return _snapshot(record)
         return self._mutate(session_id, _complete, missing_none=True, reason_kind="complete_document_processing")
 
@@ -258,7 +316,7 @@ class PostgresSessionStore(SessionStore):
         def _complete(record: _SessionRecord) -> SessionSnapshot | None:
             if record.status != VerificationStatus.IN_PROGRESS or record.liveness.status != LivenessStatus.PROCESSING:
                 return None
-            _complete_liveness(record, result, live_face_artifact_id, live_face_eligible, self.portrait_artifacts, self._ttl)
+            _complete_liveness(record, result, live_face_artifact_id, live_face_eligible, self._active_artifacts(), self._ttl)
             return _snapshot(record)
 
         def _release_pending() -> None:
@@ -349,14 +407,14 @@ class PostgresSessionStore(SessionStore):
                 FaceMatchStatus.FAILED,
             }:
                 raise SessionConflict("Face-match artifacts cannot be released while active")
-            _release_face_match_biometric_artifacts(record, self.portrait_artifacts)
-        self._mutate(session_id, _release, expire=True, version_only=True)
+            _release_face_match_biometric_artifacts(record, self._active_artifacts())
+        self._mutate(session_id, _release, expire=True)
 
     def fail_liveness(self, session_id: str, code: str) -> SessionSnapshot | None:
         def _fail(record: _SessionRecord) -> SessionSnapshot | None:
             if record.status != VerificationStatus.IN_PROGRESS or record.liveness.status != LivenessStatus.PROCESSING:
                 return None
-            _fail_liveness(record, code, self.portrait_artifacts, self._ttl)
+            _fail_liveness(record, code, self._active_artifacts(), self._ttl)
             return _snapshot(record)
         return self._mutate(session_id, _fail, missing_none=True, reason_kind="fail_liveness")
 
@@ -370,15 +428,22 @@ class PostgresSessionStore(SessionStore):
         return document.result
 
     def delete(self, session_id: str) -> None:
-        with self._runtime_lock, self._sessions.begin() as database:
-            database.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:value, 0))"), {"value": session_id})
-            row = database.scalar(select(VerificationSession).where(VerificationSession.session_id == session_id).with_for_update())
-            if row is not None:
-                record = self._record_from_row(row)
-                _clear_sensitive_state(record, self.portrait_artifacts)
-                database.delete(row)
-            database.execute(delete(SessionTombstone).where(SessionTombstone.session_id == session_id))
-            database.execute(delete(BrowserCredential).where(BrowserCredential.session_id == session_id))
+        effects = _ArtifactTransaction(self.portrait_artifacts)
+        try:
+            with self._runtime_lock, self._sessions.begin() as database:
+                database.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:value, 0))"), {"value": session_id})
+                row = database.scalar(select(VerificationSession).where(VerificationSession.session_id == session_id).with_for_update())
+                if row is not None:
+                    record = self._record_from_row(row)
+                    _clear_sensitive_state(record, effects)
+                    database.delete(row)
+                database.execute(delete(SessionTombstone).where(SessionTombstone.session_id == session_id))
+                database.execute(delete(BrowserCredential).where(BrowserCredential.session_id == session_id))
+        except Exception:
+            effects.rollback()
+            raise
+        effects.commit()
+        with self._runtime_lock:
             self._runtime.pop(session_id, None)
 
     def resolve_portrait_artifact(self, session_id: str):
@@ -428,84 +493,104 @@ class PostgresSessionStore(SessionStore):
 
     def cleanup(self) -> int:
         now = _now()
-        with self._runtime_lock, self._sessions.begin() as database:
-            database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CLEANUP_LOCK_ID})
-            database.execute(delete(SessionTombstone).where(SessionTombstone.retained_until <= now))
-            return self._expire_due_locked(database, now, skip_locked=True)
+        effects = _ArtifactTransaction(self.portrait_artifacts)
+        try:
+            with self._runtime_lock, self._sessions.begin() as database:
+                database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CLEANUP_LOCK_ID})
+                database.execute(delete(SessionTombstone).where(SessionTombstone.retained_until <= now))
+                count = self._expire_due_locked(database, now, skip_locked=True, effects=effects)
+        except Exception:
+            effects.rollback()
+            raise
+        effects.commit()
+        return count
 
     def expiry_tombstone_deadline(self, session_id: str) -> datetime | None:
         now = _now()
-        with self._runtime_lock, self._sessions.begin() as database:
-            database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _TOMBSTONE_LOCK_ID})
-            database.execute(delete(SessionTombstone).where(SessionTombstone.retained_until <= now))
-            row = database.scalar(select(VerificationSession).where(VerificationSession.session_id == session_id).with_for_update())
-            if row is not None and row.expires_at <= now:
-                self._expire_row(database, row, now)
-            return database.scalar(select(SessionTombstone.retained_until).where(SessionTombstone.session_id == session_id))
+        effects = _ArtifactTransaction(self.portrait_artifacts)
+        try:
+            with self._runtime_lock, self._sessions.begin() as database:
+                database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _TOMBSTONE_LOCK_ID})
+                database.execute(delete(SessionTombstone).where(SessionTombstone.retained_until <= now))
+                row = database.scalar(select(VerificationSession).where(VerificationSession.session_id == session_id).with_for_update())
+                if row is not None and row.expires_at <= now:
+                    self._expire_row(database, row, now, effects=effects)
+                deadline = database.scalar(select(SessionTombstone.retained_until).where(SessionTombstone.session_id == session_id))
+        except Exception:
+            effects.rollback()
+            raise
+        effects.commit()
+        return deadline
 
     def recover(self) -> int:
         """Conservatively settle states that depended on process-local work."""
         recovered = 0
-        with self._runtime_lock, self._sessions.begin() as database:
-            database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RECOVERY_LOCK_ID})
-            self._expire_due_locked(database, _now(), skip_locked=False)
-            rows = list(database.scalars(select(VerificationSession).where(VerificationSession.verification_status == VerificationStatus.IN_PROGRESS.value).with_for_update()))
-            for row in rows:
-                record = self._record_from_row(row, include_runtime=False)
-                changed = False
-                if record.nif_verification.status == NifVerificationStatus.PROCESSING:
-                    state = record.nif_verification
-                    state.status = NifVerificationStatus.UNAVAILABLE
-                    state.error_code = "NIF_VERIFICATION_INTERRUPTED"
-                    state.settled = True
-                    _refresh_verification_completion(record)
-                    record.event_sequence += 1
-                    nif_reasons = ["nif.completed"]
-                    if record.status == VerificationStatus.COMPLETED:
-                        nif_reasons.append("verification.completed")
-                    elif record.status == VerificationStatus.FAILED:
-                        nif_reasons.append("verification.failed")
-                    self._insert_events(database, _snapshot(record), tuple(nif_reasons))
-                    changed = True
-                document_interrupted = (
-                    row.document_front_capture_status == CaptureStatus.ACCEPTED.value
-                    or row.document_back_capture_status == CaptureStatus.ACCEPTED.value
-                    or record.document.status in {DocumentStatus.READY, DocumentStatus.QUEUED, DocumentStatus.PROCESSING}
-                ) and record.document.status not in {DocumentStatus.PASSED, DocumentStatus.PARTIAL, DocumentStatus.FAILED}
-                face_inputs_lost = (
-                    record.face_match_required
-                    and record.document.status == DocumentStatus.PASSED
-                    and record.face_match.status != FaceMatchStatus.COMPLETED
-                )
-                if document_interrupted:
-                    record.document.status = DocumentStatus.FAILED
-                    record.document.error_code = "PROCESS_INTERRUPTED_DOCUMENT"
-                    record.status = VerificationStatus.FAILED
-                    record.event_sequence += 1
-                    self._insert_events(database, _snapshot(record), ("document.failed", "verification.failed"))
-                    changed = True
-                elif record.liveness.status == LivenessStatus.PROCESSING:
-                    record.liveness.status = LivenessStatus.FAILED
-                    record.liveness.error_code = "PROCESS_INTERRUPTED_LIVENESS"
-                    record.status = VerificationStatus.FAILED
-                    record.event_sequence += 1
-                    self._insert_events(database, _snapshot(record), ("liveness.failed", "verification.failed"))
-                    changed = True
-                elif face_inputs_lost or (
-                    record.face_match_required
-                    and record.liveness.status == LivenessStatus.PASSED
-                    and record.face_match.status != FaceMatchStatus.COMPLETED
-                ):
-                    record.face_match.status = FaceMatchStatus.FAILED
-                    record.face_match.error_code = "PROCESS_INTERRUPTED_FACE_MATCH"
-                    record.status = VerificationStatus.FAILED
-                    record.event_sequence += 1
-                    self._insert_events(database, _snapshot(record), ("verification.failed",))
-                    changed = True
-                if changed:
-                    record.expires_at = _now() + self._ttl
-                    self._write_record(row, record, version=row.version + 1)
-                    recovered += 1
+        effects = _ArtifactTransaction(self.portrait_artifacts)
+        try:
+            with self._runtime_lock, self._sessions.begin() as database:
+                database.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RECOVERY_LOCK_ID})
+                self._expire_due_locked(database, _now(), skip_locked=False, effects=effects)
+                rows = list(database.scalars(select(VerificationSession).where(VerificationSession.verification_status == VerificationStatus.IN_PROGRESS.value).with_for_update()))
+                for row in rows:
+                    record = self._record_from_row(row, include_runtime=False)
+                    changed = False
+                    if record.nif_verification.status == NifVerificationStatus.PROCESSING:
+                        state = record.nif_verification
+                        state.status = NifVerificationStatus.UNAVAILABLE
+                        state.error_code = "NIF_VERIFICATION_INTERRUPTED"
+                        state.settled = True
+                        _refresh_verification_completion(record)
+                        record.event_sequence += 1
+                        nif_reasons = ["nif.completed"]
+                        if record.status == VerificationStatus.COMPLETED:
+                            nif_reasons.append("verification.completed")
+                        elif record.status == VerificationStatus.FAILED:
+                            nif_reasons.append("verification.failed")
+                        self._insert_events(database, _snapshot(record), tuple(nif_reasons))
+                        changed = True
+                    document_interrupted = (
+                        row.document_front_capture_status == CaptureStatus.ACCEPTED.value
+                        or row.document_back_capture_status == CaptureStatus.ACCEPTED.value
+                        or record.document.status in {DocumentStatus.READY, DocumentStatus.QUEUED, DocumentStatus.PROCESSING}
+                    ) and record.document.status not in {DocumentStatus.PASSED, DocumentStatus.PARTIAL, DocumentStatus.FAILED}
+                    face_inputs_lost = (
+                        record.face_match_required
+                        and record.document.status == DocumentStatus.PASSED
+                        and record.face_match.status != FaceMatchStatus.COMPLETED
+                    )
+                    if document_interrupted:
+                        record.document.status = DocumentStatus.FAILED
+                        record.document.error_code = "PROCESS_INTERRUPTED_DOCUMENT"
+                        record.status = VerificationStatus.FAILED
+                        record.event_sequence += 1
+                        self._insert_events(database, _snapshot(record), ("document.failed", "verification.failed"))
+                        changed = True
+                    elif record.liveness.status == LivenessStatus.PROCESSING:
+                        record.liveness.status = LivenessStatus.FAILED
+                        record.liveness.error_code = "PROCESS_INTERRUPTED_LIVENESS"
+                        record.status = VerificationStatus.FAILED
+                        record.event_sequence += 1
+                        self._insert_events(database, _snapshot(record), ("liveness.failed", "verification.failed"))
+                        changed = True
+                    elif face_inputs_lost or (
+                        record.face_match_required
+                        and record.liveness.status == LivenessStatus.PASSED
+                        and record.face_match.status != FaceMatchStatus.COMPLETED
+                    ):
+                        record.face_match.status = FaceMatchStatus.FAILED
+                        record.face_match.error_code = "PROCESS_INTERRUPTED_FACE_MATCH"
+                        record.status = VerificationStatus.FAILED
+                        record.event_sequence += 1
+                        self._insert_events(database, _snapshot(record), ("verification.failed",))
+                        changed = True
+                    if changed:
+                        record.expires_at = _now() + self._ttl
+                        self._write_record(row, record, version=row.version + 1)
+                        recovered += 1
+        except Exception:
+            effects.rollback()
+            raise
+        effects.commit()
         return recovered
 
     def _mutate(
@@ -515,9 +600,32 @@ class PostgresSessionStore(SessionStore):
         *,
         expire: bool = False,
         missing_none: bool = False,
-        version_only: bool = False,
         reason_kind: str | None = None,
         on_none: Callable[[], None] | None = None,
+    ) -> Any:
+        effects = _ArtifactTransaction(self.portrait_artifacts)
+        token = _ACTIVE_ARTIFACT_EFFECTS.set(effects)
+        try:
+            return self._mutate_with_effects(
+                session_id, transition, expire=expire, missing_none=missing_none,
+                reason_kind=reason_kind, on_none=on_none, effects=effects,
+            )
+        except Exception:
+            effects.rollback()
+            raise
+        finally:
+            _ACTIVE_ARTIFACT_EFFECTS.reset(token)
+
+    def _mutate_with_effects(
+        self,
+        session_id: str,
+        transition: Callable[[_SessionRecord], Any],
+        *,
+        expire: bool,
+        missing_none: bool,
+        reason_kind: str | None,
+        on_none: Callable[[], None] | None,
+        effects: _ArtifactTransaction,
     ) -> Any:
         with self._runtime_lock:
             expired = False
@@ -533,14 +641,12 @@ class PostgresSessionStore(SessionStore):
                     self._raise_missing(database, session_id)
                 assert row is not None
                 if expire and row.expires_at <= _now():
-                    self._expire_row(database, row, _now())
+                    self._expire_row(database, row, _now(), effects=effects)
                     expired = True
                 else:
                     record = self._record_from_row(row)
                     result = transition(record)
-                    if version_only:
-                        self._write_record(row, record, version=row.version + 1)
-                    elif result is not None:
+                    if result is not None:
                         self._write_record(row, record, version=row.version + 1)
                         self._insert_events(
                             database,
@@ -552,22 +658,33 @@ class PostgresSessionStore(SessionStore):
             if expired:
                 raise SessionExpired("Session has expired")
             assert record is not None
+            effects.commit()
             self._store_runtime(record)
             return result
+
+    def _active_artifacts(self) -> _ArtifactTransaction | InMemoryPortraitArtifactStore | None:
+        """Use transaction-scoped artifact effects while a PostgreSQL mutation runs."""
+        return _ACTIVE_ARTIFACT_EFFECTS.get() or self.portrait_artifacts
 
     def _read_record(self, session_id: str, *, expire: bool) -> _SessionRecord:
         expired = False
         record = None
-        with self._runtime_lock, self._sessions.begin() as database:
-            row = database.scalar(select(VerificationSession).where(VerificationSession.session_id == session_id).with_for_update())
-            if row is None:
-                self._raise_missing(database, session_id)
-            assert row is not None
-            if expire and row.expires_at <= _now():
-                self._expire_row(database, row, _now())
-                expired = True
-            else:
-                record = self._record_from_row(row)
+        effects = _ArtifactTransaction(self.portrait_artifacts)
+        try:
+            with self._runtime_lock, self._sessions.begin() as database:
+                row = database.scalar(select(VerificationSession).where(VerificationSession.session_id == session_id).with_for_update())
+                if row is None:
+                    self._raise_missing(database, session_id)
+                assert row is not None
+                if expire and row.expires_at <= _now():
+                    self._expire_row(database, row, _now(), effects=effects)
+                    expired = True
+                else:
+                    record = self._record_from_row(row)
+        except Exception:
+            effects.rollback()
+            raise
+        effects.commit()
         if expired:
             raise SessionExpired("Session has expired")
         assert record is not None
@@ -669,19 +786,30 @@ class PostgresSessionStore(SessionStore):
             raise SessionExpired("Session has expired")
         raise SessionNotFound("Session was not found")
 
-    def _expire_due_locked(self, database: Session, now: datetime, *, skip_locked: bool) -> int:
+    def _expire_due_locked(
+        self, database: Session, now: datetime, *, skip_locked: bool,
+        effects: _ArtifactTransaction | None = None,
+    ) -> int:
         rows = list(database.scalars(select(VerificationSession).where(VerificationSession.expires_at <= now).with_for_update(skip_locked=skip_locked)))
         for row in rows:
-            self._expire_row(database, row, now)
+            self._expire_row(database, row, now, effects=effects)
         database.execute(delete(SessionTombstone).where(SessionTombstone.retained_until <= now))
         return len(rows)
 
-    def _expire_row(self, database: Session, row: VerificationSession, now: datetime) -> None:
+    def _expire_row(
+        self, database: Session, row: VerificationSession, now: datetime,
+        *, effects: _ArtifactTransaction | None = None,
+    ) -> None:
         runtime = self._runtime.get(row.session_id)
         if runtime is not None:
             record = self._record_from_row(row)
-            _clear_sensitive_state(record, self.portrait_artifacts)
-            self._runtime.pop(row.session_id, None)
+            _clear_sensitive_state(record, effects or self.portrait_artifacts)
+            if effects is None:
+                self._runtime.pop(row.session_id, None)
+            else:
+                effects.after_commit(
+                    lambda session_id=row.session_id: self._runtime.pop(session_id, None)
+                )
         database.execute(
             insert(SessionTombstone)
             .values(session_id=row.session_id, retained_until=now + self._ttl)

@@ -34,3 +34,8 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 kyc_engine = ["configs/*.json"]
+
+[tool.uv.workspace]
+members = [
+    "nif-checker",
+]

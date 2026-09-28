@@ -15,7 +15,7 @@ from helpers import FakeCoordinator, settings
 
 
 class ApiCompositionTests(unittest.TestCase):
-    @patch("kyc_api.composition.build_paddle_document_coordinator")
+    @patch("kyc_api.composition.engine.build_paddle_document_coordinator")
     def test_uses_the_library_two_sided_factory(self, build_coordinator) -> None:
         expected = FakeCoordinator()
         configured = settings()
@@ -32,8 +32,8 @@ class ApiCompositionTests(unittest.TestCase):
             portrait_artifacts=artifacts,
         )
 
-    @patch("kyc_api.composition.OpenCVHaarFaceDetector")
-    @patch("kyc_api.composition.MiniFASNetAntiSpoofDetector")
+    @patch("kyc_api.composition.engine.OpenCVHaarFaceDetector")
+    @patch("kyc_api.composition.engine.MiniFASNetAntiSpoofDetector")
     def test_liveness_composition_constructs_detectors_for_passive_and_face_selection(
         self, detector_class, face_detector_class
     ) -> None:
@@ -82,7 +82,7 @@ class ApiCompositionTests(unittest.TestCase):
                 liveness_frame_count=4,
             )
 
-    @patch("kyc_api.composition.InsightFaceRecognizer")
+    @patch("kyc_api.composition.engine.InsightFaceRecognizer")
     def test_face_recognition_is_optional_and_uses_explicit_local_configuration(
         self, recognizer_class
     ) -> None:

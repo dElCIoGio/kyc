@@ -134,7 +134,7 @@ class ApiProtectionTests(unittest.TestCase):
             self.assertEqual(201, client.post("/v1/sessions", headers=AUTH_HEADERS).status_code)
 
     def test_rate_limit_window_resets(self) -> None:
-        with patch("kyc_api.rate_limit.monotonic", side_effect=(10.0, 10.0, 10.5, 71.0)):
+        with patch("kyc_api.infrastructure.rate_limit.api.monotonic", side_effect=(10.0, 10.0, 10.5, 71.0)):
             limiter = ApiKeyRateLimiter(max_requests=1, window_seconds=60)
             self.assertIsNone(limiter.allow())
             self.assertEqual(60, limiter.allow())

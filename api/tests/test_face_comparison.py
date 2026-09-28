@@ -152,7 +152,7 @@ class FaceComparisonServiceTests(unittest.TestCase):
         )
         from fastapi.testclient import TestClient
 
-        with patch("kyc_api.main.create_face_recognizer", return_value=recognizer) as factory:
+        with patch("kyc_api.app.create_face_recognizer", return_value=recognizer) as factory:
             app = create_app(settings=configured, coordinator=FakeCoordinator())
             with TestClient(app) as client:
                 self.assertIs(recognizer, app.state.face_comparison._recognizer)

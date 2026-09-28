@@ -120,3 +120,41 @@ for that session completes successfully. A deliberately unconfigured comparison
 is reported as unavailable and excluded from that aggregation. The passive
 policy is an initial uncalibrated development default. See
 [the public API contract](api-contract.md) for the external projection.
+
+## API Service Layout
+
+`api/src/kyc_api` follows the existing runtime boundaries. The engine remains
+an independent installable library; the API never moves its HTTP or session
+concerns into `kyc_engine`.
+
+- `application/sessions/store.py` contains the current in-memory `SessionStore`
+  as one cohesive lifecycle/storage implementation. Its locks, mutable records,
+  expiry tombstones, claims, and biometric artifact ownership remain together.
+- `application/verification`, `application/jobs`, and
+  `application/orchestration` own the existing workflow coordination. They do
+  not import FastAPI or the MINFIN/Playwright runtime.
+- `domain` holds only provider-independent values: verification enums and the
+  NIF verifier/result contract. Legacy `kyc_api.models` re-exports the exact
+  same enum objects rather than redeclaring them.
+- `infrastructure` contains concrete rate limiting, observability, SQLite
+  webhook delivery, and the MINFIN adapter. Only that adapter imports the
+  external `nif_checker` package, which retains Playwright portal ownership.
+- `http` contains FastAPI authentication, middleware, public schemas, and
+  response projection. Existing route handlers remain in the application
+  factory because they share its established injection and lifespan behavior;
+  they access sessions only through public methods.
+- `composition` constructs engine/model dependencies. `app.py` retains the
+  application factory and lifecycle ownership, while `main.py` preserves the
+  deployed `kyc_api.main:app` entrypoint.
+
+The hosted verifier stays in `kyc_api/verify` because its Vite, Docker, wheel
+package-data, and static-file paths are deployment contracts. The repository
+`web/` Go sandbox and `nif-checker/` package likewise remain separate.
+
+## Persistence Boundary
+
+`application.sessions.SessionStore` is the current process-local lifecycle and
+storage implementation. It is not a pure domain repository. A future
+PostgreSQL task may replace it or introduce a persistence abstraction at this
+application boundary; this repository has no database models, migrations, SQL,
+or persistence adapter.

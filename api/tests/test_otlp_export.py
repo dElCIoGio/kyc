@@ -36,8 +36,8 @@ class OtlpExportConfigurationTests(unittest.TestCase):
     def test_disabled_export_requires_no_endpoint_or_exporters(self) -> None:
         self.assertIsNone(build_otlp_export_configuration(settings()))
         with (
-            patch("kyc_api.telemetry.OTLPSpanExporter") as span_exporter,
-            patch("kyc_api.telemetry.OTLPMetricExporter") as metric_exporter,
+            patch("kyc_api.infrastructure.observability.telemetry.OTLPSpanExporter") as span_exporter,
+            patch("kyc_api.infrastructure.observability.telemetry.OTLPMetricExporter") as metric_exporter,
         ):
             tracer_provider = build_tracer_provider(
                 environment="test", service_version="test"
@@ -142,10 +142,10 @@ class OtlpExportConfigurationTests(unittest.TestCase):
         fake_span_exporter = MagicMock()
         fake_processor = MagicMock()
         with (
-            patch("kyc_api.telemetry.OTLPSpanExporter", return_value=fake_span_exporter) as span_exporter,
-            patch("kyc_api.telemetry.BatchSpanProcessor", return_value=fake_processor) as processor,
-            patch("kyc_api.telemetry.TraceIdRatioBased") as ratio_sampler,
-            patch("kyc_api.telemetry.ParentBased") as parent_sampler,
+            patch("kyc_api.infrastructure.observability.telemetry.OTLPSpanExporter", return_value=fake_span_exporter) as span_exporter,
+            patch("kyc_api.infrastructure.observability.telemetry.BatchSpanProcessor", return_value=fake_processor) as processor,
+            patch("kyc_api.infrastructure.observability.telemetry.TraceIdRatioBased") as ratio_sampler,
+            patch("kyc_api.infrastructure.observability.telemetry.ParentBased") as parent_sampler,
         ):
             provider = build_tracer_provider(
                 environment="beta", service_version="test", export=export
@@ -164,9 +164,9 @@ class OtlpExportConfigurationTests(unittest.TestCase):
         fake_metric_exporter = MagicMock()
         fake_reader = MagicMock()
         with (
-            patch("kyc_api.telemetry.OTLPMetricExporter", return_value=fake_metric_exporter) as metric_exporter,
-            patch("kyc_api.telemetry.PeriodicExportingMetricReader", return_value=fake_reader) as reader,
-            patch("kyc_api.telemetry.MeterProvider") as meter_provider,
+            patch("kyc_api.infrastructure.observability.telemetry.OTLPMetricExporter", return_value=fake_metric_exporter) as metric_exporter,
+            patch("kyc_api.infrastructure.observability.telemetry.PeriodicExportingMetricReader", return_value=fake_reader) as reader,
+            patch("kyc_api.infrastructure.observability.telemetry.MeterProvider") as meter_provider,
         ):
             build_meter_provider(environment="beta", service_version="test", export=export)
         metric_exporter.assert_called_once_with(
@@ -195,7 +195,7 @@ class OtlpExportConfigurationTests(unittest.TestCase):
         )
         try:
             with patch(
-                "kyc_api.jobs.trace.get_tracer",
+                "kyc_api.application.jobs.manager.trace.get_tracer",
                 return_value=provider.get_tracer("test.failing_export"),
             ):
                 manager.submit_document_processing(session_id)

@@ -1,0 +1,1 @@
+from .minfin import MinfinNifVerifier

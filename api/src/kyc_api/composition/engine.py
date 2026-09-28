@@ -19,7 +19,7 @@ from kyc_engine import (
 from kyc_engine.intake import ImageIntake
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
 
-from .settings import ApiSettings
+from ..settings import ApiSettings
 
 
 def create_coordinator(

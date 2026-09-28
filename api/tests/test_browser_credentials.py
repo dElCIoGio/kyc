@@ -99,8 +99,8 @@ class BrowserCredentialTests(unittest.TestCase):
         liveness = FakeLivenessEvaluator()
         assessor = Mock()
         with (
-            patch("kyc_api.sessions._now", return_value=started) as session_clock,
-            patch("kyc_api.browser_credentials._now", return_value=started) as credential_clock,
+            patch("kyc_api.application.sessions.store._now", return_value=started) as session_clock,
+            patch("kyc_api.application.security.browser_credentials._now", return_value=started) as credential_clock,
             TestClient(
                 create_app(
                     settings=settings(session_ttl_seconds=60, browser_token_ttl_seconds=120),

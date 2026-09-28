@@ -22,7 +22,7 @@ from kyc_api.infrastructure.persistence.models import (
     VerificationSession,
     WebhookEventRow,
 )
-from kyc_api.infrastructure.persistence.postgres_sessions import PostgresSessionStore
+from kyc_api.infrastructure.persistence.postgres_sessions import _ArtifactTransaction, PostgresSessionStore
 from kyc_api.infrastructure.persistence.webhook_outbox import PostgresWebhookOutbox
 from kyc_api.models import DocumentSide, DocumentStatus, FaceMatchStatus, NifVerificationStatus
 from kyc_engine import LivenessResult, PortraitExtractionResult, PortraitStatus
@@ -144,6 +144,28 @@ class PostgresPersistenceTests(unittest.TestCase):
                 .where(VerificationSession.session_id == session_id)
             ).one()
         self.assertEqual(before, after)
+
+    def test_failed_transaction_does_not_release_owned_live_face(self) -> None:
+        artifacts = InMemoryPortraitArtifactStore()
+        store = self.store(webhook_enabled=True, liveness_required=True, portrait_artifacts=artifacts)
+        session_id, job_id = self._running_document(store)
+        store.complete_document_processing(session_id, job_id, extraction_result())
+        store.start_liveness(session_id)
+        artifact_id = artifacts.put(np.zeros((64, 64, 3), dtype=np.uint8))
+        self.assertTrue(artifacts.claim((artifact_id,), session_id))
+        # This simulates an owned ephemeral face retained by a running worker;
+        # it is deliberately not written to the durable row.
+        store._runtime[session_id].live_face_artifact_id = artifact_id
+        store._runtime[session_id].live_face_eligible = True
+        original = store._insert_events
+        store._insert_events = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("outbox failed"))  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "outbox failed"):
+            store.fail_liveness(session_id, "LIVENESS_EVALUATION_FAILED")
+        store._insert_events = original  # type: ignore[method-assign]
+        self.assertIsNotNone(artifacts.get(artifact_id, session_id=session_id))
+        self.assertEqual("processing", store.get(session_id).liveness_status.value)
+        self.assertIsNotNone(store.fail_liveness(session_id, "LIVENESS_EVALUATION_FAILED"))
+        self.assertFalse(artifacts.exists(artifact_id))
 
     def test_document_workflow_and_result_survive_new_store(self) -> None:
         store = self.store()
@@ -395,6 +417,93 @@ class PostgresPersistenceTests(unittest.TestCase):
         self.assertEqual(FaceMatchStatus.COMPLETED, restarted.face_match_result(session_id).status)
         self.assertIsNone(restarted.face_match_result(session_id).similarity)
 
+    def test_concurrent_nif_claim_and_duplicate_completion_are_single_mutations(self) -> None:
+        source = extraction_result()
+        assert source.front is not None
+        applicable = replace(source, front=replace(source.front, fields={
+            "id_number": ExtractedField("id_number", FieldStatus.VALID, "123", "123", 0.99, None),
+        }))
+        first = self.store(nif_verification_enabled=True, webhook_enabled=True)
+        session_id, job_id = self._running_document(first)
+        first.complete_document_processing(session_id, job_id, applicable)
+        second = self.store(nif_verification_enabled=True, webhook_enabled=True)
+        with self.engine.connect() as connection:
+            before = connection.execute(select(VerificationSession.version, VerificationSession.event_sequence).where(VerificationSession.session_id == session_id)).one()
+        barrier = Barrier(2)
+
+        def claim(store):
+            barrier.wait()
+            return store.claim_nif_verification(session_id)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            claims = list(executor.map(claim, (first, second)))
+        self.assertEqual(1, sum(claim is not None for claim in claims))
+        with self.engine.connect() as connection:
+            claimed = connection.execute(select(VerificationSession.version, VerificationSession.event_sequence, VerificationSession.nif_status).where(VerificationSession.session_id == session_id)).one()
+        self.assertEqual(before.version + 1, claimed.version)
+        self.assertEqual(before.event_sequence + 1, claimed.event_sequence)
+        self.assertEqual(NifVerificationStatus.PROCESSING.value, claimed.nif_status)
+
+        barrier = Barrier(2)
+
+        def complete(store):
+            barrier.wait()
+            return store.complete_nif_verification(
+                session_id, status=NifVerificationStatus.VERIFIED, source="minfin", name_match=True
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            completions = list(executor.map(complete, (first, second)))
+        self.assertEqual(1, sum(completion is not None for completion in completions))
+        with self.engine.connect() as connection:
+            completed = connection.execute(select(VerificationSession.version, VerificationSession.event_sequence).where(VerificationSession.session_id == session_id)).one()
+            events = connection.scalar(select(func.count()).select_from(WebhookEventRow).where(
+                WebhookEventRow.session_id == session_id,
+                WebhookEventRow.event_type == "verification.nif.completed",
+            ))
+        self.assertEqual(claimed.version + 1, completed.version)
+        self.assertEqual(claimed.event_sequence + 1, completed.event_sequence)
+        self.assertEqual(1, events)
+
+    def test_duplicate_face_completion_and_document_timeout_races_have_one_winner(self) -> None:
+        first = self.store(liveness_required=True, face_match_enabled=True, webhook_enabled=True)
+        session_id, job_id = self._running_document(first)
+        first.complete_document_processing(session_id, job_id, extraction_result())
+        first.start_liveness(session_id)
+        first.complete_liveness(session_id, LivenessResult(True, 0.9, 3, 3))
+        first.start_face_match(session_id)
+        second = self.store(liveness_required=True, face_match_enabled=True, webhook_enabled=True)
+        barrier = Barrier(2)
+
+        def complete_face(store):
+            barrier.wait()
+            return store.complete_face_match(session_id, 0.75)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            completed = list(executor.map(complete_face, (first, second)))
+        self.assertEqual(1, sum(item is not None for item in completed))
+        self.assertEqual(FaceMatchStatus.COMPLETED, first.get(session_id).face_match_status)
+
+        racing = self.store(webhook_enabled=True)
+        race_id, race_job = self._running_document(racing)
+        rival = self.store(webhook_enabled=True)
+        barrier = Barrier(2)
+
+        def finish():
+            barrier.wait()
+            return racing.complete_document_processing(race_id, race_job, extraction_result())
+
+        def timeout():
+            barrier.wait()
+            return rival.timeout_document_processing(race_id, race_job)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda operation: operation(), (finish, timeout)))
+        self.assertEqual(1, sum(item is not None for item in results))
+        final = racing.get(race_id)
+        self.assertIn(final.document.status, {DocumentStatus.PASSED, DocumentStatus.FAILED})
+        self.assertEqual(race_job, final.document.job_id)
+
     def test_concurrent_browser_rotation_leaves_one_active_digest(self) -> None:
         sessions = self.store()
         session_id = sessions.create().session_id
@@ -602,6 +711,27 @@ class PostgresPersistenceTests(unittest.TestCase):
                     )
                 ),
             )
+
+
+class ArtifactTransactionTests(unittest.TestCase):
+    def test_post_commit_cleanup_is_best_effort_and_continues(self) -> None:
+        class CleanupStore:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+            def release_pending(self, artifact_ids: tuple[str, ...]) -> None:
+                self.calls.append(("pending", artifact_ids))
+                raise RuntimeError("cleanup failure")
+
+            def release_owned(self, artifact_ids: tuple[str, ...], _session_id: str) -> None:
+                self.calls.append(("owned", artifact_ids))
+
+        store = CleanupStore()
+        effects = _ArtifactTransaction(store)  # type: ignore[arg-type]
+        effects.release_pending(("first",))
+        effects.release_owned(("second",), "session")
+        effects.commit()
+        self.assertEqual([("pending", ("first",)), ("owned", ("second",))], store.calls)
 
 
 @unittest.skipUnless(_URL, "KYC_TEST_DATABASE_URL is required for PostgreSQL integration tests")

@@ -131,15 +131,29 @@ class _ArtifactTransaction:
         self._after_commit.append(action)
 
     def commit(self) -> None:
+        """Run post-commit cleanup without changing an already durable result.
+
+        These releases are idempotent best-effort privacy cleanup.  They are
+        deliberately isolated: an unexpected runtime cleanup error cannot make
+        a caller observe a failed transaction after PostgreSQL has committed.
+        """
         if self._store is not None:
             for kind, artifact_ids, session_id in self._releases:
-                if kind == "pending":
-                    self._store.release_pending(artifact_ids)
-                else:
-                    assert session_id is not None
-                    self._store.release_owned(artifact_ids, session_id)
+                try:
+                    if kind == "pending":
+                        self._store.release_pending(artifact_ids)
+                    else:
+                        assert session_id is not None
+                        self._store.release_owned(artifact_ids, session_id)
+                except Exception:
+                    # Runtime artifacts are intentionally non-durable.  The
+                    # database outcome is authoritative once committed.
+                    continue
         for action in self._after_commit:
-            action()
+            try:
+                action()
+            except Exception:
+                continue
 
     def rollback(self) -> None:
         if self._store is None:

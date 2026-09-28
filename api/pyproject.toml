@@ -16,6 +16,7 @@ dependencies = [
     "uvicorn[standard]>=0.35,<1",
     "pydantic-settings>=2.10,<3",
     "python-multipart>=0.0.20,<1",
+    "nif-checker>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]

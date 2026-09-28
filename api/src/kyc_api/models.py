@@ -56,6 +56,15 @@ class PublicFaceComparisonStatus(StrEnum):
     NOT_AVAILABLE = "not_available"
 
 
+class NifVerificationStatus(StrEnum):
+    NOT_RUN = "not_run"
+    PROCESSING = "processing"
+    VERIFIED = "verified"
+    NOT_FOUND = "not_found"
+    UNAVAILABLE = "unavailable"
+    FAILED = "failed"
+
+
 class DocumentStatus(StrEnum):
     AWAITING_CAPTURE = "awaiting_capture"
     READY = "ready"
@@ -120,6 +129,16 @@ class FaceComparisonStateResponse(BaseModel):
     status: PublicFaceComparisonStatus
 
 
+class NifVerificationResponse(BaseModel):
+    """Public-safe external registry outcome; it deliberately contains no PII."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: NifVerificationStatus
+    source: str | None = None
+    name_match: bool | None = None
+
+
 class SessionResponse(BaseModel):
     """Public representation of one verification session."""
 
@@ -133,6 +152,7 @@ class SessionResponse(BaseModel):
     document: DocumentStateResponse
     liveness: LivenessStateResponse
     face_comparison: FaceComparisonStateResponse
+    nif_verification: NifVerificationResponse
 
 
 class CaptureResponse(BaseModel):
@@ -201,6 +221,14 @@ class VerificationResultResponse(BaseModel):
     document: ResultDocumentResponse
     liveness: LivenessStateResponse
     face_comparison: FaceComparisonStateResponse
+    nif_verification: NifVerificationResponse
+
+
+class NifVerificationRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    nif: str
+    claimed_name: str | None = None
 
 
 class HealthResponse(BaseModel):

@@ -39,6 +39,9 @@ class ApiSettings(BaseSettings):
     face_recognition_model_root: Path | None = None
     face_recognition_model_id: str | None = None
     face_match_workers: int = Field(default=1, gt=0)
+    nif_verification_enabled: bool = False
+    nif_timeout_seconds: float = Field(default=20.0, gt=0, le=60)
+    nif_standalone_queue_capacity: int = Field(default=8, gt=0)
     session_ttl_seconds: int = Field(default=30 * 60, gt=0)
     browser_token_ttl_seconds: int = Field(default=31 * 60, gt=0)
     browser_rate_limit_requests: int = Field(default=60, gt=0)

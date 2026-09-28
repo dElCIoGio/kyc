@@ -11,6 +11,7 @@ from .models import (
     FaceMatchStatus,
     LivenessStateResponse,
     LivenessStatus,
+    NifVerificationResponse,
     NextAction,
     PublicDocumentStatus,
     PublicFaceComparisonStatus,
@@ -50,6 +51,7 @@ def session_response(snapshot: SessionSnapshot) -> SessionResponse:
         ),
         liveness=_liveness_state(snapshot),
         face_comparison=_face_comparison_state(snapshot),
+        nif_verification=_nif_state(snapshot),
     )
 
 
@@ -104,6 +106,7 @@ def result_response(
         ),
         liveness=_liveness_state(snapshot),
         face_comparison=_face_comparison_state(snapshot),
+        nif_verification=_nif_state(snapshot),
     )
 
 
@@ -182,4 +185,12 @@ def _face_comparison_state(snapshot: SessionSnapshot) -> FaceComparisonStateResp
             FaceMatchStatus.COMPLETED: PublicFaceComparisonStatus.COMPLETED,
             FaceMatchStatus.FAILED: PublicFaceComparisonStatus.FAILED,
         }[snapshot.face_match_status]
+    )
+
+
+def _nif_state(snapshot: SessionSnapshot) -> NifVerificationResponse:
+    return NifVerificationResponse(
+        status=snapshot.nif_verification_status,
+        source=snapshot.nif_verification_source,
+        name_match=snapshot.nif_name_match,
     )

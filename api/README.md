@@ -287,6 +287,29 @@ check; its raw similarity is never exposed by sessions, results, or webhooks.
 operation if bounded job capacity left processing pending. It returns an updated
 session and never creates duplicate work.
 
+### External NIF verification
+
+OCR extracts the document identifier; it does not query taxpayer records. When
+`KYC_NIF_VERIFICATION_ENABLED=true`, the API separately verifies the valid
+normalized `id_number` from the applicable `ao_id_card/front/v1` document
+profile after extraction. Public state exposes only `status`, `source`, and
+`name_match`; MINFIN responses, taxpayer data, identifiers, names, cookies,
+and portal diagnostics are never returned or logged.
+
+Customers can use the same capability without a KYC session:
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/v1/verifications/nif `
+  -H "X-API-Key: $env:KYC_API_KEY" `
+  -H "Content-Type: application/json" `
+  -d '{"nif":"007096754LA043","claimed_name":"Example Name"}'
+```
+
+This endpoint never accepts hosted-browser credentials. MINFIN is an external
+dependency: `unavailable` and `failed` are operational outcomes, distinct from
+authoritative `not_found`. The beta queue is bounded and a saturated standalone
+queue returns `503 NIF_VERIFIER_CAPACITY_EXCEEDED`.
+
 Retrieve the normalized result once `document.result_available` is true. Its
 document outcome may be `completed`, `partial`, or `failed`:
 

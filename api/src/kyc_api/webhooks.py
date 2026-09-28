@@ -32,6 +32,7 @@ class WebhookEvent:
     next_action: str | None
     result_available: bool
     created_at: str
+    nif_verification: dict[str, object] | None = None
 
     @classmethod
     def from_snapshot(
@@ -50,22 +51,36 @@ class WebhookEvent:
             next_action=session.next_action.value if session.next_action is not None else None,
             result_available=session.document.result_available,
             created_at=datetime.now(UTC).isoformat(),
+            nif_verification=(
+                session.nif_verification.model_dump()
+                if event_type == "verification.nif.completed"
+                else None
+            ),
         )
 
     def payload(self) -> bytes:
+        data: dict[str, object]
+        if self.nif_verification is not None:
+            data = {
+                "session_id": self.session_id,
+                "sequence": self.sequence,
+                "nif_verification": self.nif_verification,
+            }
+        else:
+            data = {
+                "session_id": self.session_id,
+                "sequence": self.sequence,
+                "status": self.session_status,
+                "next_action": self.next_action,
+                "result_available": self.result_available,
+            }
         return json.dumps(
             {
                 "schema_version": "1",
                 "id": self.event_id,
                 "type": self.event_type,
                 "created_at": self.created_at,
-                "data": {
-                    "session_id": self.session_id,
-                    "sequence": self.sequence,
-                    "status": self.session_status,
-                    "next_action": self.next_action,
-                    "result_available": self.result_available,
-                },
+                "data": data,
             },
             separators=(",", ":"),
             sort_keys=True,
@@ -295,4 +310,5 @@ def _event_type(transition_reason: str) -> str | None:
         "liveness.failed": "verification.liveness.failed",
         "verification.failed": "verification.processing.failed",
         "verification.completed": "verification.processing.completed",
+        "nif.completed": "verification.nif.completed",
     }.get(transition_reason)

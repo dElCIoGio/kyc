@@ -60,8 +60,18 @@ from .models import (
     JobStatusResponse,
     LivenessSubmissionResponse,
     MetricsResponse,
+    NifVerificationRequest,
+    NifVerificationResponse,
     SessionResponse,
     VerificationResultResponse,
+)
+from .nif import (
+    MinfinNifVerifier,
+    NifVerifier,
+    NifVerifierCapacityExceeded,
+    NifVerificationDispatcher,
+    NifVerificationOrchestrator,
+    normalize_nif_input,
 )
 from .projection import result_response, session_response
 from .rate_limit import ApiKeyRateLimiter
@@ -99,12 +109,15 @@ def create_app(
     browser_rate_limiter: BrowserCredentialRateLimiter | None = None,
     webhook_dispatcher: WebhookDispatcher | None = None,
     portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
+    nif_verifier: NifVerifier | None = None,
+    nif_dispatcher: NifVerificationDispatcher | None = None,
 ) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         resolved_settings = settings or ApiSettings()  # type: ignore[call-arg]
         face_match_dispatcher: FaceMatchDispatcher | None = None
+        resolved_nif_dispatcher: NifVerificationDispatcher | None = None
         configure_logging(
             level=resolved_settings.log_level,
             environment=resolved_settings.environment,
@@ -163,11 +176,13 @@ def create_app(
                 portrait_artifacts=resolved_artifacts,
                 liveness_required=resolved_liveness_evaluator is not None,
                 face_match_enabled=face_comparison_required,
+                nif_verification_enabled=resolved_settings.nif_verification_enabled,
             )
             if session_store is not None:
                 resolved_store.configure_requirements(
                     liveness_required=resolved_liveness_evaluator is not None,
                     face_match_required=face_comparison_required,
+                    nif_verification_enabled=resolved_settings.nif_verification_enabled,
                 )
             resolved_coordinator = coordinator or create_coordinator(
                 resolved_settings, portrait_artifacts=resolved_artifacts
@@ -179,6 +194,19 @@ def create_app(
                 resolved_settings
             )
             resolved_metrics = metrics or MetricsRegistry()
+            if resolved_settings.nif_verification_enabled:
+                resolved_nif_dispatcher = nif_dispatcher or NifVerificationDispatcher(
+                    verifier_factory=(
+                        (lambda: nif_verifier)
+                        if nif_verifier is not None
+                        else lambda: MinfinNifVerifier(
+                            timeout_seconds=resolved_settings.nif_timeout_seconds
+                        )
+                    ),
+                    session_capacity=resolved_settings.max_sessions,
+                    standalone_capacity=resolved_settings.nif_standalone_queue_capacity,
+                    timeout_seconds=resolved_settings.nif_timeout_seconds,
+                )
             resolved_face_comparison = (
                 FaceComparisonService(
                     session_store=resolved_store,
@@ -237,6 +265,25 @@ def create_app(
                 if resolved_face_comparison is not None
                 else None
             )
+            nif_orchestrator = (
+                NifVerificationOrchestrator(
+                    store=resolved_store,
+                    dispatcher=resolved_nif_dispatcher,
+                    metrics=resolved_metrics,
+                    snapshot_publisher=(
+                        resolved_dispatcher.enqueue if resolved_dispatcher is not None else None
+                    ),
+                )
+                if resolved_nif_dispatcher is not None
+                else None
+            )
+
+            def on_document_state_changed(snapshot):
+                if nif_orchestrator is not None:
+                    nif_orchestrator.on_document_state_changed(snapshot)
+                if orchestrator is not None:
+                    orchestrator.on_document_state_changed(snapshot)
+
             manager = JobManager(
                 resolved_coordinator,
                 resolved_store,
@@ -248,11 +295,7 @@ def create_app(
                 webhook_publisher=resolved_dispatcher.enqueue
                 if resolved_dispatcher is not None
                 else None,
-                on_document_state_changed=(
-                    orchestrator.on_document_state_changed
-                    if orchestrator is not None
-                    else None
-                ),
+                on_document_state_changed=on_document_state_changed,
             )
             verification_manager = VerificationManager(
                 assessor=resolved_capture_assessor,
@@ -276,6 +319,8 @@ def create_app(
                     },
                 )
         except Exception as exc:
+            if resolved_nif_dispatcher is not None:
+                resolved_nif_dispatcher.shutdown()
             if face_match_dispatcher is not None:
                 face_match_dispatcher.shutdown()
             logger.exception(
@@ -299,6 +344,8 @@ def create_app(
         application.state.face_comparison = resolved_face_comparison
         application.state.orchestrator = orchestrator
         application.state.face_match_dispatcher = face_match_dispatcher
+        application.state.nif_dispatcher = resolved_nif_dispatcher
+        application.state.nif_orchestrator = nif_orchestrator
         application.state.rate_limiter = resolved_rate_limiter
         application.state.browser_rate_limiter = resolved_browser_rate_limiter
         application.state.browser_credentials = browser_credentials
@@ -323,6 +370,8 @@ def create_app(
             manager.shutdown()
             if face_match_dispatcher is not None:
                 face_match_dispatcher.shutdown()
+            if resolved_nif_dispatcher is not None:
+                resolved_nif_dispatcher.shutdown()
             if resolved_dispatcher is not None:
                 resolved_dispatcher.shutdown()
             telemetry_timeout_millis = round(
@@ -394,6 +443,49 @@ def create_app(
     def get_metrics(request: Request) -> MetricsResponse:
         return MetricsResponse(
             version=__version__, **request.app.state.metrics.snapshot()
+        )
+
+    @application.post(
+        "/v1/verifications/nif",
+        response_model=NifVerificationResponse,
+        tags=["NIF verification"],
+        summary="Verify an Angolan NIF against MINFIN",
+        description="Performs an external registry lookup without creating a KYC session.",
+        dependencies=[Depends(require_api_key)],
+        responses={
+            401: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
+    async def verify_nif(
+        payload: NifVerificationRequest, request: Request
+    ) -> NifVerificationResponse:
+        dispatcher = request.app.state.nif_dispatcher
+        if dispatcher is None:
+            raise _problem(
+                503,
+                "NIF_VERIFICATION_UNAVAILABLE",
+                "NIF verification is not enabled",
+            )
+        try:
+            normalized_nif = normalize_nif_input(payload.nif)
+        except (TypeError, ValueError) as exc:
+            raise _problem(422, "INVALID_NIF", "NIF must contain letters or digits") from exc
+        try:
+            completed = dispatcher.submit_standalone(normalized_nif, payload.claimed_name)
+        except NifVerifierCapacityExceeded as exc:
+            request.app.state.metrics.record_nif_capacity_rejected(operation="standalone")
+            raise _problem(
+                503,
+                "NIF_VERIFIER_CAPACITY_EXCEEDED",
+                "NIF verification capacity is temporarily unavailable",
+            ) from exc
+        result = await asyncio.wrap_future(completed)
+        request.app.state.metrics.record_nif_verification(
+            outcome=result.status.value, operation="standalone", duration_seconds=0.0
+        )
+        return NifVerificationResponse(
+            status=result.status, source=result.source, name_match=result.name_match
         )
 
     @application.post(

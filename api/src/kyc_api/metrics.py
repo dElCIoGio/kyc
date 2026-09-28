@@ -109,6 +109,16 @@ class MetricsRegistry:
             unit="s",
             description="Internal face-comparison stage duration",
         )
+        self._nif_outcome_counter = meter.create_counter(
+            "nif_verification_outcome",
+            description="NIF verification outcomes without identity labels",
+        )
+        self._nif_duration = meter.create_histogram(
+            "nif_verification_duration", unit="s", description="NIF verification duration"
+        )
+        self._nif_capacity_rejected = meter.create_counter(
+            "nif_dispatch_capacity_rejected", description="Rejected bounded NIF dispatches"
+        )
 
     def record_response(self, status_code: int, duration_ms: float) -> None:
         with self._lock:
@@ -183,6 +193,21 @@ class MetricsRegistry:
                 max(0.0, duration_seconds), attributes
             )
         )
+
+    def record_nif_verification(
+        self, *, outcome: str, operation: str, duration_seconds: float
+    ) -> None:
+        attributes = {
+            "provider": "minfin",
+            "outcome": outcome if outcome in {"verified", "not_found", "unavailable", "failed"} else "unknown",
+            "operation": operation if operation in {"session", "standalone"} else "unknown",
+        }
+        self._record_otel(lambda: self._nif_outcome_counter.add(1, attributes))
+        self._record_otel(lambda: self._nif_duration.record(max(0.0, duration_seconds), attributes))
+
+    def record_nif_capacity_rejected(self, *, operation: str) -> None:
+        attributes = {"operation": operation if operation in {"session", "standalone"} else "unknown"}
+        self._record_otel(lambda: self._nif_capacity_rejected.add(1, attributes))
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:

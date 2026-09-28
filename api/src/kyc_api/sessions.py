@@ -21,6 +21,7 @@ from .models import (
     DocumentStatus,
     FaceMatchStatus,
     LivenessStatus,
+    NifVerificationStatus,
     VerificationStatus,
 )
 
@@ -64,6 +65,9 @@ class SessionSnapshot:
     document: DocumentSnapshot
     liveness_status: LivenessStatus
     face_match_status: FaceMatchStatus
+    nif_verification_status: NifVerificationStatus = NifVerificationStatus.NOT_RUN
+    nif_verification_source: str | None = None
+    nif_name_match: bool | None = None
     liveness_required: bool = True
     face_match_required: bool = False
     event_sequence: int = 0
@@ -113,6 +117,19 @@ class _FaceMatchState:
 
 
 @dataclass
+class _NifVerificationState:
+    status: NifVerificationStatus = NifVerificationStatus.NOT_RUN
+    source: str | None = None
+    name_match: bool | None = None
+    # Reasons are deliberately internal: they explain skipped work without
+    # leaking document data into the public session contract.
+    not_run_reason: str = "disabled"
+    error_code: str | None = None
+    settled: bool = True
+    attempted: bool = False
+
+
+@dataclass
 class _SessionRecord:
     session_id: str
     status: VerificationStatus
@@ -121,8 +138,10 @@ class _SessionRecord:
     document: _DocumentState
     liveness: _LivenessState
     face_match: _FaceMatchState
+    nif_verification: _NifVerificationState
     liveness_required: bool
     face_match_required: bool
+    nif_verification_enabled: bool
     event_sequence: int = 0
 
 
@@ -147,6 +166,7 @@ class SessionStore:
         portrait_artifacts: InMemoryPortraitArtifactStore | None = None,
         liveness_required: bool = True,
         face_match_enabled: bool = False,
+        nif_verification_enabled: bool = False,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
@@ -162,9 +182,11 @@ class SessionStore:
         self.portrait_artifacts = portrait_artifacts
         self._liveness_required = liveness_required
         self._face_match_enabled = face_match_enabled
+        self._nif_verification_enabled = nif_verification_enabled
 
     def configure_requirements(
-        self, *, liveness_required: bool, face_match_required: bool
+        self, *, liveness_required: bool, face_match_required: bool,
+        nif_verification_enabled: bool = False,
     ) -> None:
         """Bind process configuration before the store serves any sessions."""
         with self._lock:
@@ -174,6 +196,7 @@ class SessionStore:
                 return
             self._liveness_required = liveness_required
             self._face_match_enabled = face_match_required
+            self._nif_verification_enabled = nif_verification_enabled
 
     def create(self) -> SessionSnapshot:
         with self._lock:
@@ -189,8 +212,10 @@ class SessionStore:
                 document=_DocumentState(),
                 liveness=_LivenessState(),
                 face_match=_FaceMatchState(),
+                nif_verification=_NifVerificationState(),
                 liveness_required=self._liveness_required,
                 face_match_required=self._face_match_enabled,
+                nif_verification_enabled=self._nif_verification_enabled,
             )
             self._records[record.session_id] = record
             return _snapshot(record)
@@ -313,6 +338,12 @@ class SessionStore:
                 ProcessingStatus.PARTIAL: DocumentStatus.PARTIAL,
                 ProcessingStatus.FAILED: DocumentStatus.FAILED,
             }[result.status]
+            # Defer aggregate completion until the post-extraction NIF
+            # orchestrator has either claimed applicable work or explicitly
+            # settled a safe skipped state.
+            if record.nif_verification_enabled and result.status == ProcessingStatus.SUCCESS:
+                record.nif_verification.settled = False
+                record.nif_verification.not_run_reason = ""
             self._refresh_face_match_readiness(record)
             self._refresh_verification_completion(record)
             self._refresh_verification_failure(record)
@@ -415,6 +446,119 @@ class SessionStore:
             record.event_sequence += 1
             self._refresh_expiry(record)
             return _snapshot(record)
+
+    def claim_nif_verification(
+        self, session_id: str
+    ) -> tuple[str, str | None, SessionSnapshot] | None:
+        """Atomically claim applicable registry work after document extraction.
+
+        The extracted identifier and name are used only as short-lived local
+        variables for dispatch; neither is copied into NIF session state.
+        """
+        with self._lock:
+            record = self._records.get(session_id)
+            if record is None or record.status != VerificationStatus.IN_PROGRESS:
+                return None
+            nif_state = record.nif_verification
+            if nif_state.attempted or nif_state.status == NifVerificationStatus.PROCESSING:
+                return None
+            candidate = _nif_candidate(record.document.result)
+            if not record.nif_verification_enabled:
+                return self._settle_nif_not_run(record, "disabled")
+            if candidate is None:
+                reason = (
+                    "identifier_unavailable"
+                    if _nif_profile_present(record.document.result)
+                    else "not_applicable"
+                )
+                return self._settle_nif_not_run(record, reason)
+
+            nif, claimed_name = candidate
+            nif_state.status = NifVerificationStatus.PROCESSING
+            nif_state.source = "minfin"
+            nif_state.name_match = None
+            nif_state.not_run_reason = ""
+            nif_state.error_code = None
+            nif_state.settled = False
+            nif_state.attempted = True
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return nif, claimed_name, _snapshot(record)
+
+    def fail_nif_dispatch_capacity(self, session_id: str) -> SessionSnapshot | None:
+        """Settle a claimed but unstarted attempt without a provider source."""
+        with self._lock:
+            record = self._records.get(session_id)
+            if (
+                record is None
+                or record.status != VerificationStatus.IN_PROGRESS
+                or record.nif_verification.status != NifVerificationStatus.PROCESSING
+            ):
+                return None
+            state = record.nif_verification
+            state.status = NifVerificationStatus.FAILED
+            state.source = None
+            state.name_match = None
+            state.error_code = "NIF_VERIFIER_CAPACITY_EXCEEDED"
+            state.settled = True
+            self._refresh_verification_completion(record)
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def complete_nif_verification(
+        self,
+        session_id: str,
+        *,
+        status: NifVerificationStatus,
+        source: str | None,
+        name_match: bool | None,
+        error_code: str | None = None,
+    ) -> SessionSnapshot | None:
+        if status not in {
+            NifVerificationStatus.VERIFIED,
+            NifVerificationStatus.NOT_FOUND,
+            NifVerificationStatus.UNAVAILABLE,
+            NifVerificationStatus.FAILED,
+        }:
+            raise ValueError("NIF completion status is not terminal")
+        with self._lock:
+            record = self._records.get(session_id)
+            if (
+                record is None
+                or record.status != VerificationStatus.IN_PROGRESS
+                or record.nif_verification.status != NifVerificationStatus.PROCESSING
+            ):
+                return None
+            state = record.nif_verification
+            state.status = status
+            state.source = source
+            state.name_match = name_match if status == NifVerificationStatus.VERIFIED else None
+            state.error_code = error_code
+            state.settled = True
+            if status == NifVerificationStatus.NOT_FOUND:
+                record.status = VerificationStatus.FAILED
+            else:
+                self._refresh_verification_completion(record)
+            record.event_sequence += 1
+            self._refresh_expiry(record)
+            return _snapshot(record)
+
+    def _settle_nif_not_run(
+        self, record: _SessionRecord, reason: str
+    ) -> tuple[str, str | None, SessionSnapshot] | None:
+        state = record.nif_verification
+        state.status = NifVerificationStatus.NOT_RUN
+        state.source = None
+        state.name_match = None
+        state.not_run_reason = reason
+        state.error_code = None
+        state.settled = True
+        self._refresh_verification_completion(record)
+        record.event_sequence += 1
+        self._refresh_expiry(record)
+        # A tuple with an empty NIF tells orchestration that this was skipped.
+        return "", None, _snapshot(record)
 
     def start_face_match(self, session_id: str) -> SessionSnapshot:
         """Atomically claim a ready face match before model inference begins."""
@@ -646,6 +790,8 @@ class SessionStore:
             return False
         if record.document.status != DocumentStatus.PASSED:
             return False
+        if self._nif_blocks_completion(record):
+            return False
         if record.liveness_required and record.liveness.status != LivenessStatus.PASSED:
             return False
         if (
@@ -655,6 +801,16 @@ class SessionStore:
             return False
         record.status = VerificationStatus.COMPLETED
         return True
+
+    @staticmethod
+    def _nif_blocks_completion(record: _SessionRecord) -> bool:
+        if not record.nif_verification_enabled:
+            return False
+        # The post-extraction resolver must record whether the check is
+        # disabled, inapplicable, identifier-unavailable, or claimed. This
+        # brief pending state prevents a successful document from completing
+        # before that decision is made.
+        return not record.nif_verification.settled
 
     def _refresh_verification_failure(self, record: _SessionRecord) -> bool:
         if record.status != VerificationStatus.IN_PROGRESS:
@@ -779,6 +935,9 @@ def _snapshot(record: _SessionRecord) -> SessionSnapshot:
         ),
         liveness_status=record.liveness.status,
         face_match_status=record.face_match.status,
+        nif_verification_status=record.nif_verification.status,
+        nif_verification_source=record.nif_verification.source,
+        nif_name_match=record.nif_verification.name_match,
         liveness_required=record.liveness_required,
         face_match_required=record.face_match_required,
         event_sequence=record.event_sequence,
@@ -799,6 +958,31 @@ def _clear_sensitive_state(record: _SessionRecord) -> None:
     record.liveness.error_code = None
     record.liveness.live_face_artifact_id = None
     record.liveness.live_face_eligible = False
+
+
+def _nif_profile_present(result: DocumentExtractionResult | None) -> bool:
+    return result is not None and result.front is not None and result.front.profile_id == "ao_id_card/front/v1"
+
+
+def _nif_candidate(result: DocumentExtractionResult | None) -> tuple[str, str | None] | None:
+    """Return the mapped valid NIF and optional valid document name only."""
+    if not _nif_profile_present(result):
+        return None
+    assert result is not None and result.front is not None
+    identifier = result.front.fields.get("id_number")
+    if (
+        identifier is None
+        or identifier.status.value != "valid"
+        or not identifier.normalized_value
+    ):
+        return None
+    name = result.front.fields.get("full_name")
+    claimed_name = (
+        name.normalized_value
+        if name is not None and name.status.value == "valid" and name.normalized_value
+        else None
+    )
+    return identifier.normalized_value, claimed_name
 
 
 def _portrait_artifact_ids(result: DocumentExtractionResult | None) -> tuple[str, ...]:

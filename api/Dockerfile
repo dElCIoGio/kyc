@@ -27,6 +27,7 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY nif-checker ./nif-checker
 COPY api/pyproject.toml api/README.md ./api/
 COPY api/src ./api/src
 COPY --from=verifier-assets /verify/dist ./api/src/kyc_api/verify/dist
@@ -34,7 +35,8 @@ COPY --from=verifier-assets /verify/dist ./api/src/kyc_api/verify/dist
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip \
     && python -m pip install ".[ocr]" \
-    && python -m pip install ./api
+    && python -m pip install ./nif-checker ./api \
+    && python -m playwright install --with-deps chromium
 
 EXPOSE 8000
 

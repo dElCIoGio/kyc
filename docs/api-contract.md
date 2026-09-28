@@ -8,7 +8,7 @@ workflow API, not an identity approval API: it never returns `verified`,
 
 Every session response has `status`, `created_at`, `expires_at`, a derived
 `next_action`, and summaries for `document`, `liveness`, and
-`face_comparison`. `next_action` is never stored independently and is one of
+`face_comparison`, plus a safe `nif_verification` summary. `next_action` is never stored independently and is one of
 `submit_document_front`, `submit_document_back`, `submit_liveness`, `wait`, or
 `null`.
 
@@ -17,6 +17,15 @@ The server calculates `status` from the checks required for that session:
 1. Any required terminal failure makes the session `failed`.
 2. Every required successful terminal state makes it `completed`.
 3. Every other combination is `in_progress`.
+
+NIF checking is an external registry capability, not an OCR stage: document
+processing extracts and normalizes the identifier, then applicable Angolan BI
+workflows may query MINFIN. NIF statuses are `not_run`, `processing`,
+`verified`, `not_found`, `unavailable`, and `failed`. `verified` means the
+registry returned the queried identifier; `name_match` is an independent
+`true`, `false`, or `null` signal. In beta, `not_found` fails an applicable
+session, while name disagreement, temporary unavailability, and operational
+failure remain visible without becoming identity decisions.
 
 Face comparison is required only when it is configured for that verification.
 When it is required, only `face_comparison.status: "completed"` succeeds and
@@ -105,6 +114,8 @@ failure or expiry; that instruction is not a `next_action` value.
   once document processing has a terminal result.
 - `DELETE /v1/sessions/{id}` is an idempotent no-op when the session no longer
   exists and returns `204`.
+- `POST /v1/verifications/nif` performs the same MINFIN verification without a
+  session. It requires `X-API-Key` and accepts `{"nif":"...","claimed_name":"..."}`.
 
 Result fields contain canonical normalized values and field status. The API
 does not return raw OCR candidates, confidence/provenance internals, boxes,
@@ -120,7 +131,10 @@ Webhooks are PII-minimal and delivered at least once. Types are
 `verification.session.created`, `verification.document.completed`,
 `verification.document.failed`, `verification.liveness.passed`,
 `verification.liveness.failed`, `verification.processing.completed`, and
-`verification.processing.failed`.
+`verification.processing.failed`, plus `verification.nif.completed` for a
+settled session registry attempt.
+`verification.nif.completed` is emitted once for a settled session registry
+attempt and contains only the session ID, sequence, and safe NIF summary.
 
 ```json
 {"schema_version":"1","id":"evt_123","type":"verification.processing.completed","created_at":"2026-09-27T21:00:00Z","data":{"session_id":"vs_123","sequence":8,"status":"completed","next_action":null,"result_available":true}}

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 import os
-from threading import Barrier
+from threading import Barrier, Timer
+from time import monotonic, sleep
 import unittest
 
 import numpy as np
@@ -14,8 +16,11 @@ from fastapi.testclient import TestClient
 from kyc_api.main import create_app
 from kyc_api.application.events.lifecycle import WebhookEvent
 from kyc_api.application.jobs.manager import JobManager
+from kyc_api.application.orchestration.face_match import FaceMatchDispatcher, VerificationOrchestrator
+from kyc_api.application.orchestration.nif import NifVerificationDispatcher, NifVerificationOrchestrator
 from kyc_api.application.sessions.store import SessionCapacityExceeded, SessionConflict, SessionExpired, SessionNotFound, SessionStore, _now
 from kyc_api.application.security.browser_credentials import BrowserCredentialError
+from kyc_api.application.verification.service import VerificationManager
 from kyc_api.infrastructure.persistence.browser_credentials import PostgresBrowserCredentialStore
 from kyc_api.infrastructure.persistence.database import create_database_engine, verify_database
 from kyc_api.infrastructure.persistence.models import (
@@ -27,9 +32,11 @@ from kyc_api.infrastructure.persistence.models import (
 from kyc_api.infrastructure.persistence.postgres_sessions import _ArtifactTransaction, PostgresSessionStore
 from kyc_api.infrastructure.persistence.webhook_outbox import PostgresWebhookOutbox
 from kyc_api.models import DocumentSide, DocumentStatus, FaceMatchStatus, NifVerificationStatus
-from kyc_engine import LivenessResult, PortraitExtractionResult, PortraitStatus
+from kyc_engine import FaceComparisonResult, LivenessResult, PortraitExtractionResult, PortraitStatus
 from kyc_engine.contracts import ExtractedField, FieldStatus
+from kyc_engine.face_comparison import FaceComparisonError
 from kyc_engine.portrait_artifacts import InMemoryPortraitArtifactStore
+from kyc_api.domain.nif import NifVerificationResult
 
 from helpers import AUTH_HEADERS, PNG_BYTES, FakeCoordinator, accepted_capture_assessment, extraction_result, settings
 
@@ -39,10 +46,52 @@ _URL = os.environ.get("KYC_TEST_DATABASE_URL")
 
 class _InlineExecutor:
     def submit(self, callback, *args):
-        callback(*args)
+        future = Future()
+        try:
+            future.set_result(callback(*args))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
 
     def shutdown(self, **_kwargs) -> None:
         pass
+
+
+class _ImmediateTimer:
+    """Run the JobManager timeout path before document processing completes."""
+
+    def __init__(self, _delay: float, callback) -> None:
+        self.daemon = False
+        self._callback = callback
+
+    def start(self) -> None:
+        self._callback()
+
+    def cancel(self) -> None:
+        pass
+
+
+class _NifVerifier:
+    def __init__(self, result: NifVerificationResult) -> None:
+        self.result = result
+
+    async def verify(self, _nif: str, _claimed_name: str | None = None) -> NifVerificationResult:
+        return self.result
+
+    async def close(self) -> None:
+        pass
+
+
+class _FaceComparison:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+
+    def compare(self, _session_id: str) -> FaceComparisonResult:
+        if self.fail:
+            error = FaceComparisonError("face comparison failed")
+            error.code = "FACE_COMPARISON_FAILED"
+            raise error
+        return FaceComparisonResult(similarity=0.6487)
 
 
 @unittest.skipUnless(_URL, "KYC_TEST_DATABASE_URL is required for PostgreSQL integration tests")
@@ -104,9 +153,25 @@ class PostgresPersistenceTests(unittest.TestCase):
             rows = connection.execute(
                 select(WebhookEventRow.event_type, WebhookEventRow.sequence)
                 .where(WebhookEventRow.session_id == session_id)
-                .order_by(WebhookEventRow.sequence, WebhookEventRow.event_type)
             )
             return [(row.event_type, row.sequence) for row in rows]
+
+    @staticmethod
+    def _normalize_events(events: list[tuple[str, int]]) -> list[tuple[int, Counter[str]]]:
+        """Compare lifecycle sequences without assigning meaning to row order."""
+        grouped: dict[int, Counter[str]] = {}
+        for event_type, sequence in events:
+            grouped.setdefault(sequence, Counter())[event_type] += 1
+        return [(sequence, grouped[sequence]) for sequence in sorted(grouped)]
+
+    def _assert_event_parity(
+        self, memory_events: list[tuple[str, int]], postgres_session_id: str, label: str
+    ) -> None:
+        self.assertEqual(
+            self._normalize_events(memory_events),
+            self._normalize_events(self._postgres_events(postgres_session_id)),
+            label,
+        )
 
     @staticmethod
     def _memory_publisher(events: list[tuple[str, int]]):
@@ -117,17 +182,75 @@ class PostgresPersistenceTests(unittest.TestCase):
         return publish
 
     @staticmethod
-    def _run_document_workflow(store, *, coordinator: FakeCoordinator, publisher=None):
+    def _run_document_workflow(
+        store,
+        *,
+        coordinator: FakeCoordinator,
+        publisher=None,
+        on_document_state_changed=None,
+        timer_factory=None,
+    ):
         session_id = store.create().session_id
         if publisher is not None:
             publisher(store.get(session_id), "verification.session.created")
         for side in (DocumentSide.FRONT, DocumentSide.BACK):
             store.accept_document_capture(session_id, side, PNG_BYTES, accepted_capture_assessment())
         jobs = JobManager(
-            coordinator, store, workers=1, capacity=1, executor=_InlineExecutor(), webhook_publisher=publisher
+            coordinator,
+            store,
+            workers=1,
+            capacity=1,
+            executor=_InlineExecutor(),
+            timer_factory=timer_factory or Timer,
+            webhook_publisher=publisher,
+            on_document_state_changed=on_document_state_changed,
         )
         jobs.submit_document_processing(session_id)
-        return session_id
+        return session_id, jobs
+
+    @staticmethod
+    def _nif_document_result():
+        source = extraction_result()
+        assert source.front is not None
+        fields = {
+            "id_number": ExtractedField(
+                name="id_number",
+                raw_value="007096754LA043",
+                normalized_value="007096754LA043",
+                status=FieldStatus.VALID,
+                confidence=1.0,
+                selected_candidate=None,
+                warnings=(),
+            ),
+            "full_name": ExtractedField(
+                name="full_name",
+                raw_value="Ana Silva",
+                normalized_value="Ana Silva",
+                status=FieldStatus.VALID,
+                confidence=1.0,
+                selected_candidate=None,
+                warnings=(),
+            ),
+        }
+        return replace(source, front=replace(source.front, fields=fields))
+
+    @staticmethod
+    def _manager(store, jobs: JobManager, publisher=None, orchestrator=None) -> VerificationManager:
+        return VerificationManager(
+            assessor=None,  # type: ignore[arg-type]
+            store=store,
+            jobs=jobs,
+            orchestrator=orchestrator,
+            snapshot_publisher=publisher,
+        )
+
+    def _wait_for_nif(self, store, session_id: str, status: NifVerificationStatus) -> None:
+        deadline = monotonic() + 2
+        while monotonic() < deadline:
+            if store.get(session_id).nif_verification_status == status:
+                return
+            sleep(0.01)
+        self.fail(f"NIF status did not settle to {status.value}")
 
     def test_document_lifecycle_webhook_events_match_memory_publishers(self) -> None:
         """The actual memory JobManager publisher is the event compatibility oracle."""
@@ -140,8 +263,8 @@ class PostgresPersistenceTests(unittest.TestCase):
                 memory, coordinator=FakeCoordinator(status=status), publisher=self._memory_publisher(memory_events)
             )
             postgres = self.store(webhook_enabled=True)
-            session_id = self._run_document_workflow(postgres, coordinator=FakeCoordinator(status=status))
-            self.assertEqual(memory_events, self._postgres_events(session_id), status.value)
+            session_id, _ = self._run_document_workflow(postgres, coordinator=FakeCoordinator(status=status))
+            self._assert_event_parity(memory_events, session_id, status.value)
 
         memory_events = []
         memory = SessionStore(ttl_seconds=60, max_sessions=8, liveness_required=False)
@@ -149,8 +272,221 @@ class PostgresPersistenceTests(unittest.TestCase):
             memory, coordinator=FakeCoordinator(fail=True), publisher=self._memory_publisher(memory_events)
         )
         postgres = self.store(webhook_enabled=True)
-        session_id = self._run_document_workflow(postgres, coordinator=FakeCoordinator(fail=True))
-        self.assertEqual(memory_events, self._postgres_events(session_id), "explicit failure")
+        session_id, _ = self._run_document_workflow(postgres, coordinator=FakeCoordinator(fail=True))
+        self._assert_event_parity(memory_events, session_id, "explicit failure")
+
+    def test_document_timeout_webhook_events_match_memory_publishers(self) -> None:
+        memory_events: list[tuple[str, int]] = []
+        memory = SessionStore(ttl_seconds=60, max_sessions=8, liveness_required=False)
+        self._run_document_workflow(
+            memory,
+            coordinator=FakeCoordinator(),
+            publisher=self._memory_publisher(memory_events),
+            timer_factory=_ImmediateTimer,
+        )
+        postgres = self.store(webhook_enabled=True)
+        session_id, _ = self._run_document_workflow(
+            postgres, coordinator=FakeCoordinator(), timer_factory=_ImmediateTimer
+        )
+        self._assert_event_parity(memory_events, session_id, "document timeout")
+
+    def test_required_liveness_webhook_events_match_memory_publishers(self) -> None:
+        for result, label in (
+            (LivenessResult(True, 0.9, 3, 3), "passed"),
+            (LivenessResult(False, 0.2, 3, 0), "failed"),
+        ):
+            with self.subTest(liveness=label):
+                memory_events: list[tuple[str, int]] = []
+                memory = SessionStore(ttl_seconds=60, max_sessions=8, liveness_required=True)
+                memory_id, memory_jobs = self._run_document_workflow(
+                    memory,
+                    coordinator=FakeCoordinator(),
+                    publisher=self._memory_publisher(memory_events),
+                )
+                memory_manager = self._manager(
+                    memory, memory_jobs, self._memory_publisher(memory_events)
+                )
+                memory_manager.start_liveness(memory_id)
+                self.assertIsNotNone(memory_manager.complete_liveness(memory_id, result))
+
+                postgres = self.store(webhook_enabled=True, liveness_required=True)
+                postgres_id, postgres_jobs = self._run_document_workflow(
+                    postgres, coordinator=FakeCoordinator()
+                )
+                postgres_manager = self._manager(postgres, postgres_jobs)
+                postgres_manager.start_liveness(postgres_id)
+                self.assertIsNotNone(postgres_manager.complete_liveness(postgres_id, result))
+                self._assert_event_parity(memory_events, postgres_id, f"required liveness {label}")
+
+    def test_optional_liveness_failure_does_not_create_extra_completion_event(self) -> None:
+        memory_events: list[tuple[str, int]] = []
+        memory = SessionStore(
+            ttl_seconds=60,
+            max_sessions=8,
+            liveness_required=False,
+            nif_verification_enabled=True,
+        )
+        memory_coordinator = FakeCoordinator()
+        memory_coordinator.output = self._nif_document_result()
+        memory_id, memory_jobs = self._run_document_workflow(
+            memory, coordinator=memory_coordinator, publisher=self._memory_publisher(memory_events)
+        )
+        memory_manager = self._manager(memory, memory_jobs, self._memory_publisher(memory_events))
+        memory_manager.start_liveness(memory_id)
+        self.assertIsNotNone(memory_manager.fail_liveness(memory_id, "LIVENESS_EVALUATION_FAILED"))
+
+        postgres = self.store(
+            webhook_enabled=True,
+            liveness_required=False,
+            nif_verification_enabled=True,
+        )
+        postgres_coordinator = FakeCoordinator()
+        postgres_coordinator.output = self._nif_document_result()
+        postgres_id, postgres_jobs = self._run_document_workflow(
+            postgres, coordinator=postgres_coordinator
+        )
+        postgres_manager = self._manager(postgres, postgres_jobs)
+        postgres_manager.start_liveness(postgres_id)
+        self.assertIsNotNone(postgres_manager.fail_liveness(postgres_id, "LIVENESS_EVALUATION_FAILED"))
+
+        postgres_events = self._postgres_events(postgres_id)
+        self._assert_event_parity(memory_events, postgres_id, "optional liveness failure")
+        self.assertNotIn(
+            "verification.processing.completed",
+            (event_type for event_type, _sequence in postgres_events),
+        )
+
+    def test_nif_webhook_events_match_memory_publishers_for_every_terminal_outcome(self) -> None:
+        for status in (
+            NifVerificationStatus.VERIFIED,
+            NifVerificationStatus.NOT_FOUND,
+            NifVerificationStatus.UNAVAILABLE,
+            NifVerificationStatus.FAILED,
+        ):
+            with self.subTest(nif=status.value):
+                memory_events: list[tuple[str, int]] = []
+                memory = SessionStore(
+                    ttl_seconds=60,
+                    max_sessions=8,
+                    liveness_required=False,
+                    nif_verification_enabled=True,
+                )
+                memory_id = self._run_nif_workflow(
+                    memory,
+                    status,
+                    publisher=self._memory_publisher(memory_events),
+                )
+                self.assertEqual(status, memory.get(memory_id).nif_verification_status)
+
+                postgres = self.store(
+                    webhook_enabled=True,
+                    liveness_required=False,
+                    nif_verification_enabled=True,
+                )
+                postgres_id = self._run_nif_workflow(postgres, status)
+                self.assertEqual(status, postgres.get(postgres_id).nif_verification_status)
+                self._assert_event_parity(memory_events, postgres_id, f"NIF {status.value}")
+
+    def _run_nif_workflow(self, store, status: NifVerificationStatus, *, publisher=None) -> str:
+        result = NifVerificationResult(
+            status=status,
+            source="minfin",
+            name_match=True if status == NifVerificationStatus.VERIFIED else None,
+            error_code="NIF_VERIFICATION_FAILED" if status == NifVerificationStatus.FAILED else None,
+        )
+        dispatcher = NifVerificationDispatcher(
+            verifier_factory=lambda: _NifVerifier(result), session_capacity=1, standalone_capacity=1
+        )
+        orchestrator = NifVerificationOrchestrator(
+            store=store, dispatcher=dispatcher, snapshot_publisher=publisher
+        )
+        coordinator = FakeCoordinator()
+        coordinator.output = self._nif_document_result()
+        try:
+            session_id, _ = self._run_document_workflow(
+                store,
+                coordinator=coordinator,
+                publisher=publisher,
+                on_document_state_changed=orchestrator.on_document_state_changed,
+            )
+            self._wait_for_nif(store, session_id, status)
+            return session_id
+        finally:
+            dispatcher.shutdown()
+
+    def test_face_match_webhook_events_match_memory_publishers(self) -> None:
+        for fail, label in ((False, "completed"), (True, "failed")):
+            with self.subTest(face_match=label):
+                memory_events: list[tuple[str, int]] = []
+                memory_artifacts = InMemoryPortraitArtifactStore()
+                memory = SessionStore(
+                    ttl_seconds=60,
+                    max_sessions=8,
+                    liveness_required=True,
+                    face_match_enabled=True,
+                    portrait_artifacts=memory_artifacts,
+                )
+                memory_id = self._run_face_match_workflow(
+                    memory,
+                    memory_artifacts,
+                    fail=fail,
+                    publisher=self._memory_publisher(memory_events),
+                )
+                self.assertEqual(
+                    FaceMatchStatus.FAILED if fail else FaceMatchStatus.COMPLETED,
+                    memory.get(memory_id).face_match_status,
+                )
+
+                postgres_artifacts = InMemoryPortraitArtifactStore()
+                postgres = self.store(
+                    webhook_enabled=True,
+                    liveness_required=True,
+                    face_match_enabled=True,
+                    portrait_artifacts=postgres_artifacts,
+                )
+                postgres_id = self._run_face_match_workflow(
+                    postgres, postgres_artifacts, fail=fail
+                )
+                self.assertEqual(
+                    FaceMatchStatus.FAILED if fail else FaceMatchStatus.COMPLETED,
+                    postgres.get(postgres_id).face_match_status,
+                )
+                self._assert_event_parity(memory_events, postgres_id, f"face match {label}")
+
+    def _run_face_match_workflow(
+        self, store, artifacts: InMemoryPortraitArtifactStore, *, fail: bool, publisher=None
+    ) -> str:
+        dispatcher = FaceMatchDispatcher(workers=1, capacity=1, executor=_InlineExecutor())
+        orchestrator = VerificationOrchestrator(
+            store=store,
+            face_comparison_service=_FaceComparison(fail=fail),  # type: ignore[arg-type]
+            dispatcher=dispatcher,
+            snapshot_publisher=publisher,
+        )
+        coordinator = FakeCoordinator()
+        portrait_id = artifacts.put(np.zeros((32, 32, 3), dtype=np.uint8))
+        coordinator.output = self._portrait_result(portrait_id)
+        try:
+            session_id, jobs = self._run_document_workflow(
+                store,
+                coordinator=coordinator,
+                publisher=publisher,
+                on_document_state_changed=orchestrator.on_document_state_changed,
+            )
+            manager = self._manager(store, jobs, publisher, orchestrator)
+            manager.start_liveness(session_id)
+            live_face_id = artifacts.put(np.ones((32, 32, 3), dtype=np.uint8))
+            self.assertIsNotNone(
+                manager.complete_liveness(
+                    session_id,
+                    LivenessResult(True, 0.9, 3, 3),
+                    live_face_id,
+                    live_face_eligible=True,
+                )
+            )
+            return session_id
+        finally:
+            dispatcher.shutdown()
 
     def test_document_artifact_claim_is_compensated_when_outbox_write_fails(self) -> None:
         artifacts = InMemoryPortraitArtifactStore()
@@ -361,7 +697,8 @@ class PostgresPersistenceTests(unittest.TestCase):
 
     def test_expiry_cleanup_racing_capture_cannot_resurrect_a_session(self) -> None:
         first = self.store(webhook_enabled=True)
-        session_id = first.create().session_id
+        created = first.create()
+        session_id = created.session_id
         credentials = PostgresBrowserCredentialStore(engine=self.engine, sessions=first, ttl_seconds=60)
         token, _ = credentials.issue(session_id)
         with self.engine.begin() as connection:
@@ -393,7 +730,14 @@ class PostgresPersistenceTests(unittest.TestCase):
         with self.engine.connect() as connection:
             self.assertEqual(0, connection.scalar(select(func.count()).select_from(VerificationSession).where(VerificationSession.session_id == session_id)))
             self.assertEqual(1, connection.scalar(select(func.count()).select_from(SessionTombstone).where(SessionTombstone.session_id == session_id)))
-            self.assertEqual(0, connection.scalar(select(func.count()).select_from(WebhookEventRow).where(WebhookEventRow.session_id == session_id)))
+            events = list(
+                connection.execute(
+                    select(WebhookEventRow.sequence, WebhookEventRow.event_type).where(
+                        WebhookEventRow.session_id == session_id
+                    )
+                )
+            )
+        self.assertEqual([(created.event_sequence, "verification.session.created")], events)
         with self.assertRaises(SessionExpired):
             second.get(session_id)
         self.assertEqual(64, len(credentials.authorize(token, session_id, safe_read=True)))

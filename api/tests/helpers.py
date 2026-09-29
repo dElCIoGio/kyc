@@ -112,6 +112,10 @@ class FakeCoordinator:
             raise RuntimeError("sensitive backend failure")
         return self.output
 
+    def release_pending_artifacts(self, _result: DocumentExtractionResult) -> None:
+        """Match the coordinator cleanup hook without retaining test artifacts."""
+        return None
+
 
 class FakeLivenessEvaluator:
     def __init__(

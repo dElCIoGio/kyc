@@ -12,6 +12,8 @@ from sqlalchemy import delete, func, select, text, update
 from fastapi.testclient import TestClient
 
 from kyc_api.main import create_app
+from kyc_api.application.events.lifecycle import WebhookEvent
+from kyc_api.application.jobs.manager import JobManager
 from kyc_api.application.sessions.store import SessionCapacityExceeded, SessionConflict, SessionExpired, SessionNotFound, SessionStore, _now
 from kyc_api.application.security.browser_credentials import BrowserCredentialError
 from kyc_api.infrastructure.persistence.browser_credentials import PostgresBrowserCredentialStore
@@ -33,6 +35,14 @@ from helpers import AUTH_HEADERS, PNG_BYTES, FakeCoordinator, accepted_capture_a
 
 
 _URL = os.environ.get("KYC_TEST_DATABASE_URL")
+
+
+class _InlineExecutor:
+    def submit(self, callback, *args):
+        callback(*args)
+
+    def shutdown(self, **_kwargs) -> None:
+        pass
 
 
 @unittest.skipUnless(_URL, "KYC_TEST_DATABASE_URL is required for PostgreSQL integration tests")
@@ -88,6 +98,59 @@ class PostgresPersistenceTests(unittest.TestCase):
         assert queued.document.job_id is not None
         store.start_document_processing(session_id, queued.document.job_id)
         return session_id, queued.document.job_id
+
+    def _postgres_events(self, session_id: str) -> list[tuple[str, int]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(WebhookEventRow.event_type, WebhookEventRow.sequence)
+                .where(WebhookEventRow.session_id == session_id)
+                .order_by(WebhookEventRow.sequence, WebhookEventRow.event_type)
+            )
+            return [(row.event_type, row.sequence) for row in rows]
+
+    @staticmethod
+    def _memory_publisher(events: list[tuple[str, int]]):
+        def publish(snapshot, reason: str) -> None:
+            event = WebhookEvent.from_snapshot(snapshot, transition_reason=reason)
+            if event is not None:
+                events.append((event.event_type, event.sequence))
+        return publish
+
+    @staticmethod
+    def _run_document_workflow(store, *, coordinator: FakeCoordinator, publisher=None):
+        session_id = store.create().session_id
+        if publisher is not None:
+            publisher(store.get(session_id), "verification.session.created")
+        for side in (DocumentSide.FRONT, DocumentSide.BACK):
+            store.accept_document_capture(session_id, side, PNG_BYTES, accepted_capture_assessment())
+        jobs = JobManager(
+            coordinator, store, workers=1, capacity=1, executor=_InlineExecutor(), webhook_publisher=publisher
+        )
+        jobs.submit_document_processing(session_id)
+        return session_id
+
+    def test_document_lifecycle_webhook_events_match_memory_publishers(self) -> None:
+        """The actual memory JobManager publisher is the event compatibility oracle."""
+        from kyc_engine import ProcessingStatus
+
+        for status in (ProcessingStatus.SUCCESS, ProcessingStatus.PARTIAL, ProcessingStatus.FAILED):
+            memory_events: list[tuple[str, int]] = []
+            memory = SessionStore(ttl_seconds=60, max_sessions=8, liveness_required=False)
+            self._run_document_workflow(
+                memory, coordinator=FakeCoordinator(status=status), publisher=self._memory_publisher(memory_events)
+            )
+            postgres = self.store(webhook_enabled=True)
+            session_id = self._run_document_workflow(postgres, coordinator=FakeCoordinator(status=status))
+            self.assertEqual(memory_events, self._postgres_events(session_id), status.value)
+
+        memory_events = []
+        memory = SessionStore(ttl_seconds=60, max_sessions=8, liveness_required=False)
+        self._run_document_workflow(
+            memory, coordinator=FakeCoordinator(fail=True), publisher=self._memory_publisher(memory_events)
+        )
+        postgres = self.store(webhook_enabled=True)
+        session_id = self._run_document_workflow(postgres, coordinator=FakeCoordinator(fail=True))
+        self.assertEqual(memory_events, self._postgres_events(session_id), "explicit failure")
 
     def test_document_artifact_claim_is_compensated_when_outbox_write_fails(self) -> None:
         artifacts = InMemoryPortraitArtifactStore()
@@ -296,6 +359,57 @@ class PostgresPersistenceTests(unittest.TestCase):
         with self.engine.connect() as connection:
             self.assertEqual(0, connection.scalar(select(func.count()).select_from(BrowserCredential)))
 
+    def test_expiry_cleanup_racing_capture_cannot_resurrect_a_session(self) -> None:
+        first = self.store(webhook_enabled=True)
+        session_id = first.create().session_id
+        credentials = PostgresBrowserCredentialStore(engine=self.engine, sessions=first, ttl_seconds=60)
+        token, _ = credentials.issue(session_id)
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(VerificationSession)
+                .where(VerificationSession.session_id == session_id)
+                .values(expires_at=_now() - timedelta(seconds=1))
+            )
+        second = self.store(webhook_enabled=True)
+        barrier = Barrier(2)
+
+        def expire() -> int:
+            barrier.wait()
+            return first.cleanup()
+
+        def mutate() -> object:
+            barrier.wait()
+            try:
+                return second.accept_document_capture(
+                    session_id, DocumentSide.FRONT, PNG_BYTES, accepted_capture_assessment()
+                )
+            except SessionExpired:
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            expired, mutation = list(executor.map(lambda action: action(), (expire, mutate)))
+        self.assertIn(expired, {0, 1})  # Either caller may perform the expiry under the row lock.
+        self.assertIsNone(mutation)
+        with self.engine.connect() as connection:
+            self.assertEqual(0, connection.scalar(select(func.count()).select_from(VerificationSession).where(VerificationSession.session_id == session_id)))
+            self.assertEqual(1, connection.scalar(select(func.count()).select_from(SessionTombstone).where(SessionTombstone.session_id == session_id)))
+            self.assertEqual(0, connection.scalar(select(func.count()).select_from(WebhookEventRow).where(WebhookEventRow.session_id == session_id)))
+        with self.assertRaises(SessionExpired):
+            second.get(session_id)
+        self.assertEqual(64, len(credentials.authorize(token, session_id, safe_read=True)))
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(SessionTombstone)
+                .where(SessionTombstone.session_id == session_id)
+                .values(retained_until=_now() - timedelta(seconds=1))
+            )
+        first.cleanup()
+        credentials.cleanup()
+        with self.assertRaises(SessionNotFound):
+            second.get(session_id)
+        with self.engine.connect() as connection:
+            self.assertEqual(0, connection.scalar(select(func.count()).select_from(BrowserCredential).where(BrowserCredential.session_id == session_id)))
+
     def test_failure_inserts_two_same_sequence_events(self) -> None:
         store = self.store(webhook_enabled=True)
         session_id = store.create().session_id
@@ -466,13 +580,28 @@ class PostgresPersistenceTests(unittest.TestCase):
         self.assertEqual(1, events)
 
     def test_duplicate_face_completion_and_document_timeout_races_have_one_winner(self) -> None:
-        first = self.store(liveness_required=True, face_match_enabled=True, webhook_enabled=True)
+        artifacts = InMemoryPortraitArtifactStore()
+        first = self.store(
+            liveness_required=True,
+            face_match_enabled=True,
+            webhook_enabled=True,
+            portrait_artifacts=artifacts,
+        )
         session_id, job_id = self._running_document(first)
-        first.complete_document_processing(session_id, job_id, extraction_result())
+        portrait_id = artifacts.put(np.zeros((64, 64, 3), dtype=np.uint8))
+        first.complete_document_processing(session_id, job_id, self._portrait_result(portrait_id))
         first.start_liveness(session_id)
-        first.complete_liveness(session_id, LivenessResult(True, 0.9, 3, 3))
+        live_face_id = artifacts.put(np.ones((64, 64, 3), dtype=np.uint8))
+        first.complete_liveness(
+            session_id, LivenessResult(True, 0.9, 3, 3), live_face_id, True
+        )
         first.start_face_match(session_id)
-        second = self.store(liveness_required=True, face_match_enabled=True, webhook_enabled=True)
+        second = self.store(
+            liveness_required=True,
+            face_match_enabled=True,
+            webhook_enabled=True,
+            portrait_artifacts=artifacts,
+        )
         barrier = Barrier(2)
 
         def complete_face(store):

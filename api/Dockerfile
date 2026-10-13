@@ -10,8 +10,8 @@ RUN npm run build
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+  PYTHONUNBUFFERED=1 \
+  PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
@@ -20,9 +20,9 @@ WORKDIR /app
 # artifacts are mounted at runtime and deliberately excluded from the image.
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
-    libglib2.0-0 \
-    libgl1 \
-    libgomp1 \
+  libglib2.0-0 \
+  libgl1 \
+  libgomp1 \
   && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
@@ -33,10 +33,10 @@ COPY api/src ./api/src
 COPY --from=verifier-assets /verify/dist ./api/src/kyc_api/verify/dist
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip \
-    && python -m pip install ".[ocr]" \
-    && python -m pip install ./nif-checker ./api \
-    && python -m playwright install --with-deps chromium
+  python -m pip install --upgrade pip \
+  && python -m pip install ".[ocr,liveness,recognition]" \
+  && python -m pip install ./nif-checker ./api \
+  && python -m playwright install --with-deps chromium
 
 EXPOSE 8000
 
